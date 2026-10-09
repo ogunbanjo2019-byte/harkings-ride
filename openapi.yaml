@@ -1,0 +1,97 @@
+openapi: 3.0.3
+info:
+  title: CNG E-Hailing Platform API
+  version: 0.1.0
+servers:
+  - url: http://localhost:4000/api/v1
+security:
+  - bearerAuth: []
+paths:
+  /auth/register:
+    post:
+      security: []
+      summary: Register a rider or driver
+      responses:
+        '201': { description: Created }
+  /auth/login:
+    post:
+      security: []
+      summary: Login
+      responses:
+        '200': { description: Authenticated }
+  /rides:
+    post:
+      summary: Request a ride
+      responses:
+        '201': { description: Ride created }
+    get:
+      summary: List rides visible to the current role
+      responses:
+        '200': { description: Rides returned }
+  /rides/{id}/accept:
+    post:
+      summary: Accept an available ride as an eligible driver
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Ride accepted }
+  /drivers/verification/face/session:
+    post:
+      summary: Create or resume an AWS Rekognition face-liveness session
+      description: Requires a driver's explicit biometricConsent=true and a consentVersion matching the server configuration. The client must run AWS Amplify FaceLivenessDetector before completing the session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [documentId, biometricConsent, consentVersion]
+              properties:
+                documentId: { type: string }
+                biometricConsent: { type: boolean, enum: [true] }
+                consentVersion: { type: string }
+      responses:
+        '201': { description: Liveness session created }
+        '200': { description: Existing session resumed }
+        '400': { description: Invalid request, document, or consent revision }
+        '503': { description: AWS provider is not configured }
+  /drivers/verification/face/complete:
+    post:
+      summary: Retrieve liveness results and compare the reference image to the selected identity document
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId]
+              properties:
+                sessionId: { type: string }
+      responses:
+        '200': { description: Face check passed or requires manual review }
+        '202': { description: Liveness analysis is still processing }
+        '404': { description: Session does not belong to the authenticated driver }
+  /drivers/verification/face/cancel:
+    post:
+      summary: Mark a driver's abandoned face-liveness session as closed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sessionId]
+              properties:
+                sessionId: { type: string }
+      responses:
+        '200': { description: Session closed }
+        '404': { description: Session not found }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

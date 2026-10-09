@@ -1,0 +1,36 @@
+{
+  "name": "ride-platform-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CNG e-hailing platform MVP backend",
+  "scripts": {
+    "dev": "node --env-file=.env --watch src/server.js",
+    "start": "node src/server.js",
+    "test": "node --test",
+    "lint": "find src test -name '*.js' -print0 | xargs -0 -n1 node --check"
+  },
+  "dependencies": {
+    "@aws-sdk/client-rekognition": "^3.1147.0",
+    "@supabase/supabase-js": "^2.57.4",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "multer": "^2.0.2",
+    "nodemailer": "^10.0.13",
+    "uuid": "^11.0.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14",
+    "supertest": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shared trip</title>
+  <style>
+    body {
+      font: 16px system-ui;
+      max-width: 620px;
+      margin: 3rem auto;
+      padding: 0 1rem;
+      color: #14202b;
+    }
+
+    main {
+      border: 1px solid #dce3e8;
+      border-radius: 14px;
+      padding: 1.5rem;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+    }
+
+    #status {
+      font-size: 1.2rem;
+      font-weight: 700;
+    }
+
+    .muted {
+      color: #647381;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Shared trip</h1>
+    <p id="status">Loading trip status…</p>
+    <div id="details" class="muted"></div>
+    <p id="location"></p>
+  </main>
+
+  <script>
+    const token = location.pathname.split('/').filter(Boolean).pop();
+
+    async function update() {
+      try {
+        const r = await fetch('/api/v1/public/trips/' + encodeURIComponent(token));
+        const j = await r.json();
+
+        if (!r.ok) {
+          document.querySelector('#status').textContent = j.message || 'Trip sharing has ended';
+          document.querySelector('#details').textContent = '';
+          document.querySelector('#location').textContent = '';
+          return;
+        }
+
+        const d = j.data;
+        document.querySelector('#status').textContent = 'Status: ' + d.status;
+
+        document.querySelector('#details').textContent = d.driver
+          ? 'Driver: ' + (d.driver.firstName || '') + (d.driver.plateNumber ? ' · ' + d.driver.plateNumber : '')
+          : 'Driver details will appear after a driver accepts.';
+
+        document.querySelector('#location').textContent = d.position
+          ? 'Latest driver position: ' + d.position.latitude + ', ' + d.position.longitude
+          : '';
+      } catch {
+        document.querySelector('#status').textContent = 'Unable to load trip status';
+      }
+    }
+
+    update();
+    setInterval(update, 5000);
+  </script>
+</body>
+</html>

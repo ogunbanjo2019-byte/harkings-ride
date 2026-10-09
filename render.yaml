@@ -1,0 +1,47 @@
+services:
+  - type: web
+    name: switchride-api
+    runtime: node
+    plan: starter
+    numInstances: 1
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_PROVIDER
+        value: supabase
+      - key: JWT_SECRET
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: APP_PUBLIC_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SENSITIVE_STORAGE_BUCKET
+        value: sensitive-documents
+      - key: EMAIL_PROVIDER
+        value: resend
+      - key: EMAIL_FROM
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: AWS_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: IDENTITY_PROVIDER
+        value: aws-rekognition
+      - key: FACE_LIVENESS_THRESHOLD
+        value: "90"
+      - key: FACE_MATCH_SIMILARITY_THRESHOLD
+        value: "90"
+      - key: FACE_CONSENT_VERSION
+        value: face-check-v1
