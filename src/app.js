@@ -7,6 +7,7 @@ import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import { env } from './config/env.js';
 import { errorHandler, notFound } from './middleware/errors.js';
+import { createPersistenceMiddleware } from './middleware/persistence.js';
 import authRoutes from './modules/auth/routes.js';
 import driverRoutes from './modules/drivers/routes.js';
 import extendedDriverRoutes from './modules/drivers/extended-routes.js';
@@ -26,32 +27,23 @@ import { realtimeHealth } from './services/realtime.js';
 
 const app = express();
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
-const allowedOrigins = env.corsOrigin.split(',').map((origin) => origin.trim()).filter(Boolean);
+const allowedOrigins = env.corsOrigin.split(',').map((origin) => origin.trim().replace(/\/+$/, '')).filter(Boolean);
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(requestMetrics);
 app.use(helmet({ contentSecurityPolicy: env.isProduction ? undefined : false }));
-app.use(cors({ origin: allowedOrigins.length === 1 ? allowedOrigins[0] : allowedOrigins, credentials: false }));
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (env.corsOrigin.trim() === '*') return callback(null, '*');
+    return callback(null, allowedOrigins.includes(origin) ? origin : false);
+  },
+  credentials: false,
+}));
 app.use(express.json({ limit: '1mb', verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
 app.use(express.urlencoded({ extended: true, limit: '100kb' }));
 app.use(morgan(env.isProduction ? 'combined' : 'dev'));
-app.use((req, res, next) => {
-  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
-  const sendJson = res.json.bind(res);
-  let persistenceStarted = false;
-  res.json = (body) => {
-    if (persistenceStarted) return res;
-    persistenceStarted = true;
-    persistToDatabase().then(() => sendJson(body)).catch((error) => {
-      console.error('Database persistence failed:', error.message);
-      if (res.headersSent) return;
-      res.status(503);
-      return sendJson({ success: false, message: 'The request could not be durably saved. Please retry safely.', data: null, error: { code: 'PERSISTENCE_FAILED', details: null } });
-    });
-    return res;
-  };
-  next();
-});
+app.use(createPersistenceMiddleware(persistToDatabase));
 
 app.use('/api/v1/auth', rateLimit({ windowMs: 15 * 60 * 1000, limit: 100, standardHeaders: 'draft-7', legacyHeaders: false }), authRoutes);
 
