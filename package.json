@@ -4,12 +4,13 @@
   "private": true,
   "type": "module",
   "description": "CNG e-hailing platform MVP backend",
-  "scripts": {
-    "dev": "node --env-file=.env --watch src/server.js",
-    "start": "node src/server.js",
-    "test": "node --test",
-    "lint": "find src test -name '*.js' -print0 | xargs -0 -n1 node --check"
-  },
+ "scripts": {
+  "dev": "node --env-file=.env --watch src/server.js",
+  "start": "node src/server.js",
+  "test": "node --test",
+  "lint": "find src test -name '*.js' -print0 | xargs -0 -n1 node --check",
+  "provision-admin": "node scripts/provision-admin.js"
+},
   "dependencies": {
     "@aws-sdk/client-rekognition": "^3.1147.0",
     "@supabase/supabase-js": "^2.57.4",
