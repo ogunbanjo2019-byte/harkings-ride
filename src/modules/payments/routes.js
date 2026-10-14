@@ -42,7 +42,6 @@ const paystackRequest = async (path, body, method = 'POST') => {
   return { configured: true, payload };
 };
 
-// Helper: Process and reconcile successful payments
 const applySuccessfulPayment = async (payment, providerData) => {
   if (payment.status === 'successful') return false;
 
@@ -72,6 +71,9 @@ const applySuccessfulPayment = async (payment, providerData) => {
   } else if (payment.type === 'wallet_topup' && !payment.walletCreditedAt) {
     creditRiderWallet(payment.userId, payment.amount, payment.id, 'wallet_topup');
     payment.walletCreditedAt = timestamp();
+  } else if (payment.type === 'driver_wallet_funding' && !payment.walletCreditedAt) {
+    creditWallet(payment.driverId, payment.amount, payment.reference, 'funding');
+    payment.walletCreditedAt = timestamp();
   }
 
   const user = findUser({ id: payment.userId });
@@ -90,7 +92,6 @@ const applySuccessfulPayment = async (payment, providerData) => {
   return true;
 };
 
-// Validation Schemas
 const initializePaymentSchema = z.object({
   rideId: z.string(),
   provider: z.enum(['paystack', 'flutterwave']).default('paystack'),
@@ -100,8 +101,7 @@ const saveCardSchema = z.object({
   reference: z.string().min(3)
 });
 
-// POST /api/v1/payments/webhooks/paystack - Handle Paystack Webhook events
-router.post('/webhooks/paystack', (req, res) => {
+router.post('/webhooks/paystack', asyncHandler(async (req, res) => {
   if (!env.paystackSecretKey) {
     return fail(res, 503, 'Paystack is not configured', 'PAYSTACK_NOT_CONFIGURED');
   }
@@ -124,21 +124,23 @@ router.post('/webhooks/paystack', (req, res) => {
   const event = req.body;
 
   if (event.event === 'charge.success' && event.data?.reference) {
-    const payment = db.payments.find((item) => item.reference === event.data.reference);
+    let payment = db.payments.find((item) => item.reference === event.data.reference);
+    if (!payment && event.data.customer?.customer_code && Number.isFinite(Number(event.data.amount))) {
+      const candidates = db.payments.filter((item) => item.type === 'driver_wallet_funding' && item.method === 'bank_transfer' && item.status === 'pending' && Number(item.amount) * 100 === Number(event.data.amount) && db.users.some((user) => user.id === item.userId && user.paystackCustomerCode === event.data.customer.customer_code));
+      if (candidates.length === 1) payment = candidates[0];
+    }
     if (payment) {
-      applySuccessfulPayment(payment, event.data).catch((error) =>
-        console.error('Webhook reconciliation failed:', error.message)
-      );
+      if (payment.providerTransactionId === event.data.id) return ok(res, 'Webhook accepted', { received: true });
+      payment.providerTransactionId = event.data.id;
+      await applySuccessfulPayment(payment, event.data);
     }
   }
 
   return ok(res, 'Webhook accepted', { received: true });
-});
+}));
 
-// Require authentication for all subsequent endpoints
 router.use(requireAuth);
 
-// POST /api/v1/payments/initialize - Initialize a payment for a completed ride
 router.post(
   '/initialize',
   requireRole('rider'),
@@ -223,7 +225,6 @@ router.post(
   })
 );
 
-// POST /api/v1/payments/verify/:id - Verify a payment by ID
 router.post(
   '/verify/:id',
   requireRole('rider'),
@@ -281,7 +282,6 @@ router.post(
   })
 );
 
-// GET /api/v1/payments/cards - List rider's saved payment cards
 router.get('/cards', requireRole('rider'), (req, res) =>
   ok(res, 'Saved cards', {
     cards: db.savedCards
@@ -290,7 +290,6 @@ router.get('/cards', requireRole('rider'), (req, res) =>
   })
 );
 
-// POST /api/v1/payments/cards - Save a reusable payment card authorization
 router.post(
   '/cards',
   requireRole('rider'),
@@ -350,7 +349,6 @@ router.post(
   })
 );
 
-// DELETE /api/v1/payments/cards/:id - Remove a saved payment card
 router.delete('/cards/:id', requireRole('rider'), (req, res) => {
   const i = db.savedCards.findIndex(
     (c) => c.id === req.params.id && c.userId === req.user.id
@@ -364,7 +362,6 @@ router.delete('/cards/:id', requireRole('rider'), (req, res) => {
   return ok(res, 'Saved card removed', { id: req.params.id });
 });
 
-// GET /api/v1/payments/ride/:rideId - Get payment details for a specific ride
 router.get('/ride/:rideId', requireRole('rider', 'driver', 'admin'), (req, res) => {
   const ride = findRide(req.params.rideId);
 
@@ -390,10 +387,8 @@ router.get('/ride/:rideId', requireRole('rider', 'driver', 'admin'), (req, res) 
   return ok(res, 'Ride payment', { payment });
 });
 
-// GET /api/v1/payments - Admin view all payments
 router.get('/', requireRole('admin'), (_req, res) => {
   return ok(res, 'Payments', { payments: db.payments });
 });
 
 export default router;
-

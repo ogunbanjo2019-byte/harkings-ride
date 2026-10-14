@@ -40,9 +40,7 @@ const updateStatusSchema = z.object({
   longitude: z.number().optional(),
 });
 
-const documentUploadSchema = z.object({
-  documentType: z.string().min(2).max(60),
-});
+const documentUploadSchema = z.object({ documentType: z.string().min(2).max(60).optional(), document_type: z.string().min(2).max(60).optional() }).transform((v) => ({ documentType: v.documentType || v.document_type })).pipe(z.object({ documentType: z.string().min(2).max(60) }));
 
 const identityVerificationSchema = z.object({
   verificationType: z.enum(['nin', 'biometric', 'facial']),
@@ -53,7 +51,8 @@ const updateLocationSchema = z.object({
   latitude: z.number().gte(-90).lte(90),
   longitude: z.number().gte(-180).lte(180),
   rideId: z.string().optional(),
-});
+  ride_id: z.string().optional(),
+}).transform(({ ride_id, ...v }) => ({ ...v, rideId: v.rideId || ride_id }));
 
 
 router.get('/profile', (req, res) => {
@@ -216,11 +215,13 @@ router.get('/earnings', (req, res) => {
   );
 
   const total = rides.reduce((sum, r) => sum + Number(r.fare || 0), 0);
-
-  return ok(res, 'Driver earnings', {
-    total,
-    trips: rides.length,
-  });
+  const wallet = db.wallets.find((item) => item.driverId === driver.id);
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const today = rides.filter((ride) => String(ride.completedAt || ride.updatedAt || '').slice(0, 10) === todayKey);
+  const sevenDayThreshold = Date.now() - 7 * 86400000;
+  const sevenDays = rides.filter((ride) => new Date(ride.completedAt || ride.updatedAt || 0).getTime() >= sevenDayThreshold);
+  const sumFare = (list) => list.reduce((sum, ride) => sum + Number(ride.fare || 0), 0);
+  return ok(res, 'Driver earnings', { total, trips: rides.length, available_balance: Number(wallet?.balance || 0), today: sumFare(today), last_7_days: sumFare(sevenDays), average: rides.length ? Math.round(total / rides.length) : 0, streak: driver.earningsStreak || 0, level: driver.earningsLevel || 'starter' });
 });
 
 export default router;

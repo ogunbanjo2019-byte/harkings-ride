@@ -102,12 +102,7 @@ const sessionOnlySchema = z.object({
   sessionId: z.string().min(10).max(200),
 });
 
-const sosTriggerSchema = z.object({
-  tripId: z.string().min(1),
-  latitude: z.number().gte(-90).lte(90),
-  longitude: z.number().gte(-180).lte(180),
-  note: z.string().max(500).optional(),
-});
+const sosTriggerSchema = z.object({ tripId: z.string().min(1).optional(), trip_id: z.string().min(1).optional(), latitude: z.number().gte(-90).lte(90), longitude: z.number().gte(-180).lte(180), note: z.string().max(500).optional() }).transform((v) => ({ ...v, tripId: v.tripId || v.trip_id })).pipe(z.object({ tripId: z.string().min(1), latitude: z.number(), longitude: z.number(), note: z.string().max(500).optional() }));
 
 const subscriptionPaySchema = z.object({
   days: z.number().int().min(1).max(365).default(1),
@@ -115,13 +110,13 @@ const subscriptionPaySchema = z.object({
 });
 
 const bankAccountSchema = z.object({
-  bankCode: z.string().min(3).max(20),
-  accountNumber: z.string().regex(/^\d{10}$/),
-  accountName: z.string().min(2).max(120),
-});
+  bankCode: z.string().min(3).max(20).optional(), bank_name: z.string().min(2).max(80).optional(), bankName: z.string().min(2).max(80).optional(),
+  accountNumber: z.string().regex(/^\d{10}$/).optional(), account_number: z.string().regex(/^\d{10}$/).optional(),
+  accountName: z.string().min(2).max(120).optional(), account_name: z.string().min(2).max(120).optional(),
+}).transform((v) => ({ bankCode: v.bankCode || v.bank_name || v.bankName, accountNumber: v.accountNumber || v.account_number, accountName: v.accountName || v.account_name }));
 
 const withdrawSchema = z.object({
-  amount: z.number().positive(),
+  amount: z.number().int().positive(),
   bankAccount: z
     .object({
       bankCode: z.string().min(3),
@@ -132,13 +127,10 @@ const withdrawSchema = z.object({
 });
 
 const cngLogSchema = z.object({
-  quantity: z.number().positive(),
-  amount: z.number().nonnegative(),
-  unit: z.string().min(1).max(20).optional(),
-  station: z.string().max(120).optional(),
-  odometer: z.number().nonnegative().optional(),
-  filledAt: z.string().datetime().optional(),
-});
+  quantity: z.number().positive(), amount: z.number().nonnegative().optional(), cost: z.number().nonnegative().optional(),
+  unit: z.string().min(1).max(20).optional(), station: z.string().max(120).optional(), station_location: z.string().max(120).optional(),
+  odometer: z.number().nonnegative().optional(), filledAt: z.string().datetime().optional(),
+}).transform((v) => ({ ...v, amount: v.amount ?? v.cost ?? 0, station: v.station ?? v.station_location }));
 
 
 router.get('/verification/status', (req, res) => {

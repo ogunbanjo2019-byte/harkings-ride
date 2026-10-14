@@ -29,11 +29,15 @@ const identityUpload = multer({
   limits: { fileSize: env.uploadMaxBytes, files: 1 },
 });
 
-const OTP_EXPIRY_MS = 5 * 60 * 1000; // 5 minutes
-
-// --- Helper Functions ---
+const OTP_EXPIRY_MS = 5 * 60 * 1000;
 
 const secretHash = (value) => createHash('sha256').update(value).digest('hex');
+const normalizePhone = (value = '') => {
+  const cleaned = String(value).trim().replace(/[\s()-]/g, '');
+  if (/^0\d{10}$/.test(cleaned)) return `+234${cleaned.slice(1)}`;
+  if (/^234\d{10}$/.test(cleaned)) return `+${cleaned}`;
+  return cleaned;
+};
 
 const issue = (user) => ({
   accessToken: jwt.sign({ sub: user.id, role: user.role }, env.jwtSecret, {
@@ -57,7 +61,10 @@ const sendPhoneOtp = async (to, code, purpose) => {
     return { configured: false };
   }
 
-  const auth = Buffer.from(`${env.twilioAccountSid}:${env.twilioAuthToken}`).toString('base64');
+  const auth = Buffer.from(
+    `${env.twilioAccountSid}:${env.twilioAuthToken}`
+  ).toString('base64');
+
   const body = new URLSearchParams({
     To: to,
     From: env.twilioFromNumber,
@@ -74,7 +81,7 @@ const sendPhoneOtp = async (to, code, purpose) => {
       },
       body,
     }
-  );
+   );
 
   if (!response.ok) return { configured: true, sent: false };
   return { configured: true, sent: true };
@@ -83,10 +90,9 @@ const sendPhoneOtp = async (to, code, purpose) => {
 const otpDestination = (body) => {
   return body.email
     ? { channel: 'email', destination: body.email.trim().toLowerCase() }
-    : { channel: 'phone', destination: body.phone.trim() };
+    : { channel: 'phone', destination: normalizePhone(body.phone) };
 };
 
-// --- Rate Limiters ---
 
 const otpLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -95,8 +101,22 @@ const otpLimiter = rateLimit({
   legacyHeaders: false,
   message: {
     success: false,
-    message: 'Too many OTP requests. Try again later.',
+    message: 'Too many tries. Wait a few minutes.',
     error: { code: 'OTP_RATE_LIMITED' },
+  },
+});
+
+const otpPhoneLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 5,
+  keyGenerator: (req) => req.body?.phone || req.ip,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many tries. Wait a few minutes.',
+    data: null,
+    error: { code: 'OTP_RATE_LIMITED', details: null },
   },
 });
 
@@ -111,8 +131,6 @@ const resetLimiter = rateLimit({
     error: { code: 'RESET_RATE_LIMITED' },
   },
 });
-
-// --- Validation Schemas ---
 
 const registerSchema = z.object({
   name: z.string().min(2).max(120),
@@ -137,7 +155,9 @@ const otpRequestSchema = z
       .string()
       .regex(/^\+[1-9]\d{7,14}$/, 'Use E.164 international phone format')
       .optional(),
-    purpose: z.enum(['login', 'verification', 'password_reset']).default('login'),
+    purpose: z
+      .enum(['login', 'signup', 'verification', 'password_reset'])
+      .default('login'),
   })
   .refine((value) => value.email || value.phone, 'Email or phone is required');
 
@@ -146,44 +166,61 @@ const verifyOtpSchema = z
     challengeId: z.string().uuid().optional(),
     email: z.string().email().optional(),
     phone: z.string().min(7).optional(),
-    purpose: z.enum(['login', 'verification', 'password_reset']).default('login'),
-    otp: z.string().regex(/^\d{6}$/),
+    purpose: z
+      .enum(['login', 'signup', 'verification', 'password_reset'])
+      .default('login'),
+    otp: z.string().regex(/^\d{6}$/).optional(),
+    code: z.string().regex(/^\d{6}$/).optional(),
   })
   .refine(
-    (value) => value.challengeId || value.email || value.phone,
+    (value) =>
+      (value.challengeId || value.email || value.phone) &&
+      (value.code || value.otp),
     'Challenge ID or email/phone is required'
   );
 
-const changePasswordSchema = z.object({
-  currentPassword: z.string().min(1).max(128),
-  newPassword: z.string().min(8).max(128),
-});
+const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1).max(128).optional(),
+    current_password: z.string().min(1).max(128).optional(),
+    newPassword: z.string().min(8).max(128).optional(),
+    new_password: z.string().min(8).max(128).optional(),
+  })
+  .transform((v) => ({
+    currentPassword: v.currentPassword || v.current_password,
+    newPassword: v.newPassword || v.new_password,
+  }))
+  .pipe(
+    z.object({
+      currentPassword: z.string().min(1).max(128),
+      newPassword: z.string().min(8).max(128),
+    })
+  );
 
 const forgotPasswordSchema = z.object({
   email: z.string().email(),
 });
-
 const resetPasswordSchema = z.object({
   token: z.string().min(20).max(200),
   password: z.string().min(8).max(128),
 });
 
-// --- Auth Routes ---
-
-// POST /api/v1/auth/register - Register a new rider or driver
 router.post(
   '/register',
   validate(registerSchema),
   asyncHandler(async (req, res) => {
     const email = req.body.email?.trim().toLowerCase();
+    const phone = normalizePhone(req.body.phone);
 
-    if (findUser({ email }) || findUser({ phone: req.body.phone })) {
+    if (findUser({ email }) || findUser({ phone })) {
       return fail(res, 409, 'An account with these details already exists', 'ACCOUNT_EXISTS');
     }
 
     const user = createUser({
       ...req.body,
       email,
+      phone,
+      phoneVerifiedAt: db.verifiedPhones?.some((item) => item.phone === phone) ? timestamp() : undefined,
       passwordHash: await bcrypt.hash(req.body.password, 12),
     });
 
@@ -199,13 +236,13 @@ router.post(
   })
 );
 
-// POST /api/v1/auth/login - User authentication with email/phone & password
 router.post(
   '/login',
   validate(loginSchema),
   asyncHandler(async (req, res) => {
     const email = req.body.email?.trim().toLowerCase();
-    const user = findUser({ email, phone: req.body.phone });
+    const user = findUser({ email, phone: req.body.phone ? normalizePhone(req.body.phone) : undefined });
+    if (user?.status === 'closed') return fail(res, 403, 'This account is closed. Contact support if you need your records.', 'ACCOUNT_CLOSED');
 
     if (
       !user ||
@@ -219,7 +256,6 @@ router.post(
   })
 );
 
-// POST /api/v1/auth/identity/nin - Submit rider NIN and selfie verification
 router.post(
   '/identity/nin',
   requireAuth,
@@ -291,20 +327,17 @@ router.post(
   })
 );
 
-// GET /api/v1/auth/me - Get active authenticated user details
 router.get('/me', requireAuth, (req, res) => {
   return ok(res, 'Authenticated user', { user: req.user });
 });
 
-// POST /api/v1/auth/logout - End active user session
 router.post('/logout', requireAuth, (_req, res) => {
   return ok(res, 'Logout successful');
 });
-
-// POST /api/v1/auth/send-otp - Dispatch OTP via Email or SMS
 router.post(
   '/send-otp',
   otpLimiter,
+  otpPhoneLimiter,
   validate(otpRequestSchema),
   asyncHandler(async (req, res) => {
     const { channel, destination } = otpDestination(req.body);
@@ -325,8 +358,6 @@ router.post(
     }
 
     const now = timestamp();
-
-    // Invalidate existing active OTP challenges
     db.otpChallenges
       .filter(
         (challenge) =>
@@ -382,15 +413,15 @@ router.post(
       data.developmentOtp = code;
     }
 
-    return ok(res, 'OTP generated', data, 202);
+    return ok(res, channel === 'phone' ? 'Code sent' : 'OTP generated', data, 202);
   })
 );
 
-// POST /api/v1/auth/verify-otp - Verify active OTP challenge
 router.post('/verify-otp', validate(verifyOtpSchema), (req, res) => {
+  const suppliedCode = req.body.code || req.body.otp;
   const destination = req.body.email
     ? req.body.email.trim().toLowerCase()
-    : req.body.phone?.trim();
+    : normalizePhone(req.body.phone || '');
 
   const challenge = db.otpChallenges
     .slice()
@@ -399,11 +430,13 @@ router.post('/verify-otp', validate(verifyOtpSchema), (req, res) => {
       (item) =>
         !item.usedAt &&
         item.purpose === req.body.purpose &&
-        (req.body.challengeId ? item.id === req.body.challengeId : item.destination === destination)
+        (req.body.challengeId
+          ? item.id === req.body.challengeId
+          : item.destination === destination)
     );
 
   if (!challenge || new Date(challenge.expiresAt) <= new Date()) {
-    return fail(res, 400, 'OTP is invalid or expired', 'OTP_INVALID');
+    return fail(res, 400, 'That code is not correct.', 'OTP_INVALID');
   }
 
   if (challenge.attempts >= challenge.maxAttempts) {
@@ -412,21 +445,38 @@ router.post('/verify-otp', validate(verifyOtpSchema), (req, res) => {
 
   challenge.attempts += 1;
 
-  if (challenge.codeHash !== secretHash(req.body.otp)) {
-    return fail(res, 400, 'OTP is invalid or expired', 'OTP_INVALID');
+  if (challenge.codeHash !== secretHash(suppliedCode)) {
+    if (challenge.attempts >= challenge.maxAttempts) {
+      challenge.usedAt = timestamp();
+    }
+    return fail(
+      res,
+      challenge.attempts >= challenge.maxAttempts ? 429 : 400,
+      'That code is not correct.',
+      challenge.attempts >= challenge.maxAttempts
+        ? 'OTP_ATTEMPTS_EXCEEDED'
+        : 'OTP_INVALID'
+    );
   }
 
   challenge.usedAt = timestamp();
 
   if (challenge.channel === 'phone' && challenge.purpose === 'login') {
     const user = findUser({ phone: challenge.destination });
-    if (!user || ['suspended', 'deletion_requested'].includes(user.status)) {
+    if (user?.status === 'closed') {
       return fail(
         res,
-        401,
-        'No active account is registered to this phone number',
-        'ACCOUNT_NOT_FOUND'
+        403,
+        'This account is closed. Contact support if you need your records.',
+        'ACCOUNT_CLOSED'
       );
+    }
+    if (
+      !user ||
+      user.role !== 'driver' ||
+      ['suspended', 'deletion_requested'].includes(user.status)
+    ) {
+      return fail(res, 400, 'That code is not correct.', 'OTP_INVALID');
     }
     user.phoneVerifiedAt = timestamp();
     return ok(res, 'Phone login successful', {
@@ -438,6 +488,20 @@ router.post('/verify-otp', validate(verifyOtpSchema), (req, res) => {
   if (challenge.channel === 'phone') {
     const user = findUser({ phone: challenge.destination });
     if (user) user.phoneVerifiedAt = timestamp();
+    if (challenge.purpose === 'signup') {
+      db.verifiedPhones ||= [];
+      if (
+        !db.verifiedPhones.some(
+          (item) => item.phone === challenge.destination
+        )
+      ) {
+        db.verifiedPhones.push({
+          id: id(),
+          phone: challenge.destination,
+          verifiedAt: timestamp(),
+        });
+      }
+    }
   }
 
   return ok(res, 'OTP verified', {
@@ -447,7 +511,6 @@ router.post('/verify-otp', validate(verifyOtpSchema), (req, res) => {
   });
 });
 
-// POST /api/v1/auth/refresh-token - Refresh expired access token using a refresh token
 router.post('/refresh-token', (req, res) => {
   try {
     const payload = jwt.verify(req.body?.refreshToken, env.jwtSecret);
@@ -456,6 +519,14 @@ router.post('/refresh-token', (req, res) => {
     }
 
     const user = findUser({ id: payload.sub });
+    if (user?.status === 'closed') {
+      return fail(
+        res,
+        403,
+        'This account is closed. Contact support if you need your records.',
+        'ACCOUNT_CLOSED'
+      );
+    }
     if (!user || ['suspended', 'deletion_requested'].includes(user.status)) {
       return fail(res, 401, 'Account is not active', 'ACCOUNT_INACTIVE');
     }
@@ -466,7 +537,6 @@ router.post('/refresh-token', (req, res) => {
   }
 });
 
-// POST /api/v1/auth/change-password - Change current user password
 router.post(
   '/change-password',
   requireAuth,
@@ -489,7 +559,6 @@ router.post(
   })
 );
 
-// POST /api/v1/auth/forgot-password - Request password reset email token
 router.post(
   '/forgot-password',
   resetLimiter,
@@ -529,11 +598,15 @@ router.post(
       }
     }
 
-    return ok(res, 'If the account exists, reset instructions have been sent', data, 202);
+    return ok(
+      res,
+      'If the account exists, reset instructions have been sent',
+      data,
+      202
+    );
   })
 );
 
-// POST /api/v1/auth/reset-password - Reset password using valid reset token
 router.post(
   '/reset-password',
   resetLimiter,
@@ -569,7 +642,9 @@ router.post(
         subject: 'Your SwitchRide password was changed',
         text: 'Your SwitchRide password was changed successfully. If this was not you, contact support immediately.',
         html: '<p>Your SwitchRide password was changed successfully. If this was not you, contact support immediately.</p>',
-      }).catch((error) => console.error('Password-change email failed:', error.message));
+      }).catch((error) =>
+        console.error('Password-change email failed:', error.message)
+      );
     }
 
     return ok(res, 'Password reset successfully');

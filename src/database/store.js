@@ -11,6 +11,7 @@ const collectionNames = [
   'vehicles',
   'documents',
   'rides',
+  'chatMessages',
   'rideLocations',
   'payments',
   'subscriptions',
@@ -25,6 +26,7 @@ const collectionNames = [
   'auditLogs',
   'sosEvents',
   'otpChallenges',
+  'verifiedPhones',
   'passwordResetTokens',
   'emailMessages',
   'identityChecks',
@@ -46,7 +48,8 @@ let client;
 let connected = false;
 let persistenceQueue = Promise.resolve();
 
-const useMemory = () => env.databaseProvider === 'memory' || process.env.NODE_ENV === 'test';
+const useMemory = () =>
+  env.databaseProvider === 'memory' || process.env.NODE_ENV === 'test';
 
 const requireSupabase = () => {
   if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
@@ -96,6 +99,7 @@ export const loadFromSupabase = async () => {
     if (db[row.collection]) db[row.collection].push(row.data);
   }
 };
+
 export const persistToSupabase = async () => {
   if (useMemory()) return;
   if (!client) throw new Error('Supabase is not connected');
@@ -144,12 +148,13 @@ export const findUser = ({ id: userId, email, phone } = {}) =>
 
 export const publicUser = ({ passwordHash, ...user }) => user;
 
-export const createUser = ({ name, email, phone, passwordHash, role = ROLES.RIDER }) => {
+export const createUser = ({ name, email, phone, phoneVerifiedAt, passwordHash, role = ROLES.RIDER }) => {
   const user = {
     id: id(),
     name,
     email,
     phone,
+    phoneVerifiedAt,
     passwordHash,
     role,
     status: role === ROLES.DRIVER ? 'pending' : 'active',
@@ -193,7 +198,7 @@ export const findDriverByUser = (userId) => db.drivers.find((d) => d.userId === 
 
 export const findRide = (rideId) => db.rides.find((r) => r.id === rideId);
 
-export const creditWallet = (driverId, amount, reference) => {
+export const creditWallet = (driverId, amount, reference, type = 'ride_earning') => {
   let wallet = db.wallets.find((item) => item.driverId === driverId);
   if (!wallet) {
     wallet = {
@@ -212,7 +217,7 @@ export const creditWallet = (driverId, amount, reference) => {
   db.walletTransactions.push({
     id: id(),
     driverId,
-    type: 'ride_earning',
+    type,
     amount: Number(amount),
     balanceAfter: wallet.balance,
     reference,
@@ -263,4 +268,3 @@ export const creditRiderWallet = (riderId, amount, reference, type = 'wallet_top
   });
   return db.walletTransactions.at(-1);
 };
-

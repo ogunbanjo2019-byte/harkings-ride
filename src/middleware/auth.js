@@ -19,6 +19,15 @@ export const requireAuth = (req, res, next) => {
 
     const user = findUser({ id: payload.sub });
 
+    if (user?.status === 'closed') {
+      return fail(
+        res,
+        403,
+        'This account is closed. Contact support if you need your records.',
+        'ACCOUNT_CLOSED'
+      );
+    }
+
     if (!user || ['suspended', 'deletion_requested'].includes(user.status)) {
       return fail(res, 401, 'Account is not active', 'ACCOUNT_INACTIVE');
     }

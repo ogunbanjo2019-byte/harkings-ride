@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 
 import {
@@ -21,6 +22,7 @@ import { createHash, randomBytes } from 'node:crypto';
 
 const router = Router();
 router.use(requireAuth);
+const chatSendLimiter = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false, keyGenerator: (req) => req.user.id, message: { success: false, message: 'You are sending messages too quickly. Try again in a minute.', data: null, error: { code: 'CHAT_RATE_LIMITED', details: null } } });
 
 // Return a rounded average, or null when there are no ratings yet.
 const averageRating = (ratings) => {
@@ -86,9 +88,13 @@ const rideForViewer = (ride, viewer) => {
 
   return {
     ...ride,
+    fare: Number(ride.fare || 0),
+    payment_method: ride.paymentMethod || ride.payment_method || null,
     alreadyRated: db.ratings.some((rating) => rating.rideId === ride.id && rating.riderId === ride.riderId),
     driver: canSeeDriver ? getDriverForRide(ride) : null,
     rider: canSeeRider ? getRiderForRide(ride) : null,
+    rider_name: canSeeRider ? getRiderForRide(ride)?.name || null : null,
+    rider_phone: canSeeRider ? getRiderForRide(ride)?.phone || null : null,
     driverLocation:
       canSeeDriver && latestLocation
         ? {
@@ -104,6 +110,55 @@ const coordinateSchema = z.object({
   latitude: z.number().gte(-90).lte(90),
   longitude: z.number().gte(-180).lte(180),
   address: z.string().optional(),
+});
+
+const chatTextSchema = z.object({ text: z.string().trim().min(1).max(500), client_id: z.string().min(1).max(120) });
+const chatParticipant = (ride, user) => {
+  if (user.role === 'rider' && ride.riderId === user.id) return 'rider';
+  const driver = user.role === 'driver' ? findDriverByUser(user.id) : null;
+  if (driver && ride.driverId === driver.id) return 'driver';
+  return null;
+};
+const chatMessageView = (message) => ({
+  id: message.id, ride_id: message.rideId, sender_role: message.senderRole,
+  text: message.text, client_id: message.clientId || null, created_at: message.createdAt,
+  read: Boolean(message.read),
+});
+
+router.get('/:id/messages', (req, res) => {
+  const ride = findRide(req.params.id);
+  if (!ride) return fail(res, 404, 'Ride not found', 'RIDE_NOT_FOUND');
+  if (!chatParticipant(ride, req.user)) return fail(res, 403, 'You are not a participant in this ride.', 'FORBIDDEN');
+  const messages = (db.chatMessages || []).filter((item) => item.rideId === ride.id)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt)).map(chatMessageView);
+  return ok(res, 'Ride messages', messages);
+});
+
+router.post('/:id/messages', chatSendLimiter, validate(chatTextSchema), (req, res) => {
+  const ride = findRide(req.params.id);
+  if (!ride) return fail(res, 404, 'Ride not found', 'RIDE_NOT_FOUND');
+  const senderRole = chatParticipant(ride, req.user);
+  if (!senderRole) return fail(res, 403, 'You are not a participant in this ride.', 'FORBIDDEN');
+  const text = req.body.text.trim();
+  if (/<\/?[a-z][^>]*>/i.test(text)) return fail(res, 400, 'Messages must be plain text.', 'CHAT_TEXT_NOT_PLAIN');
+  const existing = (db.chatMessages || []).find((item) => item.rideId === ride.id && item.clientId === req.body.client_id && item.senderUserId === req.user.id);
+  if (existing) return ok(res, 'Message already sent', chatMessageView(existing));
+  if (['completed', 'cancelled'].includes(ride.status)) return fail(res, 409, 'This ride’s chat is closed.', 'CHAT_CLOSED');
+  if (!['accepted', 'arrived', 'in_progress'].includes(ride.status)) return fail(res, 409, 'Chat is available after a driver accepts the ride.', 'CHAT_NOT_AVAILABLE');
+  db.chatMessages ||= [];
+  const message = { id: id(), rideId: ride.id, senderUserId: req.user.id, senderRole, text, clientId: req.body.client_id, createdAt: timestamp(), read: false };
+  db.chatMessages.push(message);
+  return ok(res, 'Message sent', chatMessageView(message), 201);
+});
+
+router.post('/:id/messages/read', (req, res) => {
+  const ride = findRide(req.params.id);
+  if (!ride) return fail(res, 404, 'Ride not found', 'RIDE_NOT_FOUND');
+  if (!chatParticipant(ride, req.user)) return fail(res, 403, 'You are not a participant in this ride.', 'FORBIDDEN');
+  for (const message of db.chatMessages || []) {
+    if (message.rideId === ride.id && message.senderUserId !== req.user.id) message.read = true;
+  }
+  return ok(res, 'Messages marked as read');
 });
 
 const createRideSchema = z.object({
@@ -310,7 +365,7 @@ router.post(
   transition('driver', 'completed')
 );
 
-const cashReceivedSchema=z.object({amount:z.number().positive()});
+const cashReceivedSchema=z.object({amount:z.number().positive().optional()}).optional();
 router.post('/:id/cash-received',requireRole('driver'),validate(cashReceivedSchema),(req,res)=>{
   const ride=findRide(req.params.id),driver=findDriverByUser(req.user.id);
   if(!ride||!driver||ride.driverId!==driver.id||ride.status!=='completed')return fail(res,404,'Completed ride not found for this driver','RIDE_NOT_FOUND');
@@ -318,7 +373,7 @@ router.post('/:id/cash-received',requireRole('driver'),validate(cashReceivedSche
   if(!payment)return fail(res,404,'Ride payment record not found','PAYMENT_NOT_FOUND');
   if(payment.status==='successful')return ok(res,'Ride payment already settled',{payment});
   const expected=ride.paymentMethod==='cash'?ride.fare:ride.fare+Number(ride.fareBreakdown?.cashSurcharge||0);
-  if(Math.round(req.body.amount)!==Math.round(expected))return fail(res,400,'Collected cash does not match the ride cash fare','CASH_AMOUNT_MISMATCH',{expectedAmount:expected});
+  if(req.body?.amount !== undefined && Math.round(req.body.amount)!==Math.round(expected))return fail(res,400,'Collected cash does not match the ride cash fare','CASH_AMOUNT_MISMATCH',{expectedAmount:expected});
   payment.amount=expected;payment.provider='cash';payment.status='successful';payment.verifiedAt=timestamp();
   if(!ride.driverPaidAt){creditWallet(driver.id,ride.fare,ride.id);ride.driverPaidAt=timestamp();}
   emitRideEvent(ride,'payment_successful',{paymentMethod:'cash',amount:expected});

@@ -260,7 +260,6 @@ router.get('/reports', (_req, res) => {
   });
 });
 
-// --- User & Driver Management Routes ---
 
 router.get('/users/search', (req, res) => {
   const query = String(req.query.q || '').trim().toLowerCase();
@@ -300,7 +299,6 @@ router.put('/drivers/:id/suspend', (req, res) => {
   return ok(res, 'Driver suspended', { driver });
 });
 
-// --- Verification & Identity Routes ---
 
 router.get('/verification/queue', (req, res) => {
   const rows = db.drivers
@@ -405,8 +403,6 @@ router.put('/identity/checks/:id', (req, res) => {
   return ok(res, 'Identity check updated', { check: safeCheck });
 });
 
-// --- Rides & Operations Routes ---
-
 router.get('/rides', (req, res) => {
   return ok(res, 'Rides', paginate(db.rides, req.query.page, req.query.limit));
 });
@@ -448,8 +444,6 @@ router.get('/subscription-ledger', (req, res) => {
     currency: 'NGN',
   });
 });
-
-// --- Payouts & Wallet Withdrawal Routes ---
 
 router.get('/wallet/withdrawals', (req, res) => {
   const withdrawals = db.withdrawals
@@ -508,7 +502,6 @@ router.post('/wallet/withdrawals/:id/process', (req, res) => {
   return ok(res, 'Payout queued for provider processing', { withdrawal, job }, 202);
 });
 
-// --- CNG Analytics Routes ---
 
 router.get('/cng-transactions', (_req, res) => ok(res, 'CNG transactions', { transactions: db.cngTransactions }));
 
@@ -529,7 +522,6 @@ router.get('/cng/summary', (_req, res) => {
   });
 });
 
-// --- Complaints & Emergency/SOS Routes ---
 
 router.get('/complaints', (_req, res) => ok(res, 'Complaints', { complaints: db.complaints }));
 
@@ -569,7 +561,6 @@ router.put('/sos/:id', (req, res) => {
   return ok(res, 'SOS alert updated', { sos: event });
 });
 
-// --- Penalties & Penalization Routes ---
 
 router.get('/penalties', (req, res) => {
   const penalties = db.auditLogs.filter((log) => ['cancel', 'penalty'].includes(log.action));
@@ -602,7 +593,6 @@ router.post('/penalties', (req, res) => {
   return ok(res, 'Penalty recorded', { penalty }, 201);
 });
 
-// --- Audit & Data Exports Routes ---
 
 router.get('/audit-logs', (req, res) => {
   const logs = db.auditLogs.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -627,6 +617,19 @@ router.get('/exports/:resource', (req, res) => {
     .type('text/csv')
     .set('Content-Disposition', `attachment; filename=${req.params.resource}.csv`)
     .send(csv(rows));
+});
+
+const reopenAccountSchema = z.object({ reason: z.string().min(5).max(300) });
+router.post('/drivers/:id/reopen-account', validate(reopenAccountSchema), (req, res) => {
+  const driver = db.drivers.find((item) => item.id === req.params.id);
+  if (!driver) return fail(res, 404, 'Driver not found', 'DRIVER_NOT_FOUND');
+  const user = findUser({ id: driver.userId });
+  if (!user || user.status !== 'closed') return fail(res, 409, 'This driver account is not closed.', 'ACCOUNT_NOT_CLOSED');
+  user.status = ['active', 'pending'].includes(user.statusBeforeClosure) ? user.statusBeforeClosure : 'active';
+  user.reopenedAt = timestamp(); user.reopenReason = req.body.reason; user.updatedAt = user.reopenedAt;
+  driver.status = 'pending'; driver.onlineStatus = false; driver.reopenedAt = user.reopenedAt;
+  audit(req, 'reopen', 'driver_account', driver.id, { reason: req.body.reason, approvalRequired: true });
+  return ok(res, 'Driver account reopened. Fresh approval is required before dispatch.', { status: user.status, driver_status: driver.status, online: false });
 });
 
 export default router;
