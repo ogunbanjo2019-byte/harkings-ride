@@ -36,7 +36,7 @@ try {
   const phone = (await ask('Admin phone: ')).trim();
   rl.close();
 
-  if (name.length < 2 || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email) || phone.length < 7) {
+   if (name.length < 2 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || phone.length < 7) {
     throw new Error('Check the name, email, and phone you entered.');
   }
 
