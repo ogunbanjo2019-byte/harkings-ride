@@ -380,6 +380,18 @@ router.post('/support/tickets', validate(supportTicketSchema), (req, res) => {
   return ok(res, 'Support ticket created', { ticket }, 201);
 });
 
+router.get('/support/tickets/:id/messages', (req, res) => {
+  const ticket = db.supportTickets.find(
+    (t) => t.id === req.params.id && t.userId === req.user.id
+  );
+  if (!ticket) {
+    return fail(res, 404, 'Support ticket not found', 'TICKET_NOT_FOUND');
+  }
+  const messages = [...(ticket.messages || [])].sort(
+    (a, b) => String(a.createdAt).localeCompare(String(b.createdAt))
+  );
+  return ok(res, 'Support ticket messages', { messages });
+});
 router.post('/support/tickets/:id/messages', validate(ticketMessageSchema), (req, res) => {
   const ticket = db.supportTickets.find(
     (t) => t.id === req.params.id && t.userId === req.user.id
@@ -418,4 +430,3 @@ router.delete('/account', (req, res) => {
 });
 
 export default router;
-
