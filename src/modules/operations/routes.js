@@ -9,7 +9,6 @@ import { validate } from '../../middleware/errors.js';
 const router = Router();
 router.use(requireAuth);
 
-// Helper functions
 const driverOf = (req) => findDriverByUser(req.user.id);
 
 const requireDriver = (req, res) => {
@@ -21,7 +20,6 @@ const requireDriver = (req, res) => {
   return driver;
 };
 
-// Validation Schemas
 const bankAccountSchema = z.object({
   bankName: z.string().min(2),
   accountNumber: z.string().min(6),
@@ -76,7 +74,6 @@ const ticketMessageSchema = z.object({
   message: z.string().min(1).max(3000),
 });
 
-// --- Driver Subscription Routes ---
 
 router.get('/subscriptions/status', requireRole('driver'), (req, res) => {
   const driver = requireDriver(req, res);
@@ -130,8 +127,6 @@ router.get('/subscriptions/history', requireRole('driver'), (req, res) => {
   const subscriptions = db.subscriptions.filter((s) => s.driverId === driver.id);
   return ok(res, 'Subscription history', { subscriptions });
 });
-
-// --- Driver Wallet Routes ---
 
 router.get('/wallet/summary', requireRole('driver'), (req, res) => {
   const driver = requireDriver(req, res);
@@ -192,9 +187,6 @@ router.get('/wallet/withdrawals', requireRole('driver'), (req, res) => {
   const withdrawals = db.withdrawals.filter((w) => w.driverId === driver.id);
   return ok(res, 'Withdrawal history', { withdrawals });
 });
-
-// --- CNG Operations Routes ---
-
 router.get('/cng/unitconfig', (_req, res) => {
   return ok(res, 'CNG unit configuration', { unit: env.cngUnit });
 });
@@ -237,8 +229,6 @@ router.get('/cng/summary', requireRole('driver'), (req, res) => {
   });
 });
 
-// --- Ratings & Complaints Routes ---
-
 router.post('/ratings', requireRole('rider'), validate(ratingSchema), (req, res) => {
   const existing = db.ratings.some(
     (r) => r.rideId === req.body.rideId && r.riderId === req.user.id
@@ -276,8 +266,6 @@ router.post(
     return ok(res, 'Complaint submitted', { complaint }, 201);
   }
 );
-
-// --- Promotions & Notifications Routes ---
 
 router.post('/promo/validate', validate(promoSchema), (req, res) => {
   const promo = db.promotions.find(
@@ -327,7 +315,6 @@ router.post('/notifications/:id/read', (req, res) => {
   return ok(res, 'Notification marked read', { notification });
 });
 
-// --- Saved Places Routes ---
 
 router.get('/places/saved', (req, res) => {
   return ok(res, 'Saved places', {
@@ -360,7 +347,6 @@ router.delete('/places/saved/:id', (req, res) => {
   return ok(res, 'Saved place removed');
 });
 
-// --- Support Ticket Routes ---
 
 router.get('/support/tickets', (req, res) => {
   const tickets = db.supportTickets.filter((t) => t.userId === req.user.id);
@@ -412,8 +398,6 @@ router.post('/support/tickets/:id/messages', validate(ticketMessageSchema), (req
   ticket.messages.push(message);
   return ok(res, 'Support message sent', { message }, 201);
 });
-
-// --- Account Management Routes ---
 
 router.delete('/account', (req, res) => {
   const user = db.users.find((u) => u.id === req.user.id);
