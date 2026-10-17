@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
@@ -9,6 +10,32 @@ import { validate } from '../../middleware/errors.js';
 
 const router = Router();
 router.use(requireAuth, requireRole('driver'));
+const walletFundingInitiateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  keyGenerator: (req) => req.user.id,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many wallet funding attempts. Try again later.',
+    data: null,
+    error: { code: 'WALLET_FUNDING_RATE_LIMITED', details: null },
+  },
+});
+const walletFundingVerifyLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  keyGenerator: (req) => req.user.id,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many wallet funding verification attempts. Try again later.',
+    data: null,
+    error: { code: 'WALLET_VERIFY_RATE_LIMITED', details: null },
+  },
+});
 const driverFor = (req) => findDriverByUser(req.user.id);
 
 const fundSchema = z.object({
@@ -75,6 +102,7 @@ const getWallet = (driver) => {
 
 router.post(
   '/wallet/fund/initiate',
+  walletFundingInitiateLimiter,
   validate(fundSchema),
   asyncHandler(async (req, res) => {
     const driver = driverFor(req);
@@ -260,6 +288,7 @@ router.post(
 
 router.post(
   '/wallet/fund/verify',
+  walletFundingVerifyLimiter,
   validate(verifySchema),
   asyncHandler(async (req, res) => {
     const driver = driverFor(req);
