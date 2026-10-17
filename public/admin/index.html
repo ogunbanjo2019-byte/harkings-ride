@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>SwitchRide Admin Back-office</title>
   <style>
-    :root {
+    body {
       --navy: #071a2b;
       --navy2: #0d2c45;
       --green: #1aa477;
@@ -600,12 +600,36 @@
     }
 
     async function cng() {
-      const d = await api('/admin/cng/summary');
+      const [d, cngPricing] = await Promise.all([
+        api('/admin/cng/summary'),
+        api('/admin/cng-pricing')
+      ]);
+      const current = cngPricing.pricing;
       $('content').innerHTML = cards({
         totalRefuels: d.totalRefuels,
         totalQuantity: d.totalQuantity,
         totalAmount: d.totalAmount
-      }) + '<div class="panel"><h2>Partner station summary</h2><div class="table-wrap"><table><thead><tr><th>Station</th><th>Refuels</th><th>Quantity</th><th>Amount</th></tr></thead><tbody>' + ((d.byStation || []).map(x => '<tr><td>' + esc(x.station) + '</td><td>' + x.refuels + '</td><td>' + x.quantity + '</td><td>₦' + Number(x.amount).toLocaleString() + '</td></tr>').join('') || '<tr><td colspan="4" class="empty">No CNG logs</td></tr>') + '</tbody></table></div></div>';
+      }) + '<div class="panel"><h2>Prepaid CNG price</h2><p>Set the price for new prepaid orders. Existing orders keep the price they were purchased at. Confirm the unit and current station price before saving.</p>' + (current ? '<p>Current: ₦' + Number(current.pricePerUnit).toLocaleString() + ' per ' + esc(current.unit) + ' · version ' + esc(current.version) + '</p>' : '<p class="tag warn">No prepaid CNG price configured yet.</p>') + '<div class="grid2"><label>Unit<select id="cngPriceUnit"><option value="litre"' + (current?.unit === 'litre' ? ' selected' : '') + '>Litre</option><option value="kg"' + (current?.unit === 'kg' ? ' selected' : '') + '>Kilogram (kg)</option></select></label><label>Price per unit (NGN)<input id="cngPricePerUnit" type="number" min="0.01" step="0.01" value="' + (current ? esc(current.pricePerUnit) : '') + '" placeholder="Enter approved price"></label></div><p><button class="primary" onclick="saveCngPricing()">Save CNG price</button> <span id="cngPricingMessage"></span></p></div><div class="panel"><h2>Partner station summary</h2><div class="table-wrap"><table><thead><tr><th>Station</th><th>Refuels</th><th>Quantity</th><th>Amount</th></tr></thead><tbody>' + ((d.byStation || []).map(x => '<tr><td>' + esc(x.station) + '</td><td>' + x.refuels + '</td><td>' + x.quantity + '</td><td>₦' + Number(x.amount).toLocaleString() + '</td></tr>').join('') || '<tr><td colspan="4" class="empty">No CNG logs</td></tr>') + '</tbody></table></div></div>';
+    }
+
+    async function saveCngPricing() {
+      const message = $('cngPricingMessage');
+      try {
+        const pricePerUnit = Number($('cngPricePerUnit').value);
+        if (!Number.isFinite(pricePerUnit) || pricePerUnit <= 0) throw Error('Enter a valid price greater than zero');
+        await api('/admin/cng-pricing', {
+          method: 'PUT',
+          body: JSON.stringify({
+            unit: $('cngPriceUnit').value,
+            pricePerUnit,
+            currency: 'NGN'
+          })
+        });
+        message.textContent = 'CNG prepaid price saved';
+        await cng();
+      } catch (e) {
+        if (message) message.textContent = e.message;
+      }
     }
 
     async function auditView() {

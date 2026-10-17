@@ -12,7 +12,6 @@ import { enqueueJob } from '../../services/jobs.js';
 const router = Router();
 router.use(requireAuth, requireRole('admin'));
 
-// --- Validation Schemas ---
 
 const pricingSchema = z.object({
   baseFare: z.number().nonnegative(),
@@ -36,8 +35,6 @@ const promotionSchema = z.object({
   active: z.boolean().default(true),
   expiresAt: z.string().datetime().optional(),
 });
-
-// --- Helper Functions ---
 
 const audit = (req, action, resource, resourceId, metadata = {}) => {
   return db.auditLogs.push({
@@ -94,7 +91,6 @@ function reviewDriver(req, res, status) {
   return ok(res, `Driver ${status}`, { driver });
 }
 
-// --- Pricing Routes ---
 
 router.get('/pricing', (req, res) =>
   ok(res, 'Current ride pricing', {
@@ -661,4 +657,3 @@ router.post('/drivers/:id/reopen-account', validate(reopenAccountSchema), (req, 
 });
 
 export default router;
-

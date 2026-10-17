@@ -10,7 +10,7 @@ import { validate } from '../../middleware/errors.js';
 const router = Router();
 router.use(requireAuth);
 
-// Helper functions
+
 const driverOf = (req) => findDriverByUser(req.user.id);
 
 const requireDriver = (req, res) => {
