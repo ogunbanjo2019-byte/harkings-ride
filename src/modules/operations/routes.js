@@ -1,7 +1,8 @@
 import { Router } from 'express';
+import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
-import { db, findDriverByUser, id, timestamp } from '../../database/store.js';
+import { db, findDriverByUser, id, timestamp, creditWallet } from '../../database/store.js';
 import { fail, ok, paginate } from '../../shared/core.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { validate } from '../../middleware/errors.js';
@@ -9,6 +10,7 @@ import { validate } from '../../middleware/errors.js';
 const router = Router();
 router.use(requireAuth);
 
+// Helper functions
 const driverOf = (req) => findDriverByUser(req.user.id);
 
 const requireDriver = (req, res) => {
@@ -20,6 +22,7 @@ const requireDriver = (req, res) => {
   return driver;
 };
 
+// Validation Schemas
 const bankAccountSchema = z.object({
   bankName: z.string().min(2),
   accountNumber: z.string().min(6),
@@ -30,6 +33,20 @@ const withdrawalSchema = z.object({
   amount: z.number().positive(),
 });
 
+const walletPinsSchema = z.object({
+  walletPin: z.string().regex(/^\d{4,6}$/),
+  duressPin: z.string().regex(/^\d{4,6}$/),
+}).refine((value) => value.walletPin !== value.duressPin, {
+  message: 'Wallet PIN and duress PIN must be different',
+});
+const cngPrepaidSchema = z.object({
+  quantity: z.number().positive().max(10000).optional(),
+  amount: z.number().int().min(100).max(1000000).optional(),
+  pin: z.string().regex(/^\d{4,6}$/),
+  clientReference: z.string().min(8).max(100),
+}).refine((value) => Number(Boolean(value.quantity)) + Number(Boolean(value.amount)) === 1, {
+  message: 'Provide either quantity or amount, but not both',
+});
 const cngLogSchema = z.object({
   quantity: z.number().positive(),
   cost: z.number().positive(),
@@ -74,6 +91,7 @@ const ticketMessageSchema = z.object({
   message: z.string().min(1).max(3000),
 });
 
+// --- Driver Subscription Routes ---
 
 router.get('/subscriptions/status', requireRole('driver'), (req, res) => {
   const driver = requireDriver(req, res);
@@ -127,6 +145,8 @@ router.get('/subscriptions/history', requireRole('driver'), (req, res) => {
   const subscriptions = db.subscriptions.filter((s) => s.driverId === driver.id);
   return ok(res, 'Subscription history', { subscriptions });
 });
+
+// --- Driver Wallet Routes ---
 
 router.get('/wallet/summary', requireRole('driver'), (req, res) => {
   const driver = requireDriver(req, res);
@@ -187,6 +207,78 @@ router.get('/wallet/withdrawals', requireRole('driver'), (req, res) => {
   const withdrawals = db.withdrawals.filter((w) => w.driverId === driver.id);
   return ok(res, 'Withdrawal history', { withdrawals });
 });
+
+// --- Driver CNG wallet/prepaid routes ---
+router.put('/drivers/wallet/pin', requireRole('driver'), validate(walletPinsSchema), async (req, res) => {
+  const driver = requireDriver(req, res);
+  if (!driver) return;
+  let security = db.walletSecurity.find((item) => item.driverId === driver.id);
+  if (!security) { security = { id: id(), driverId: driver.id, createdAt: timestamp() }; db.walletSecurity.push(security); }
+  security.walletPinHash = await bcrypt.hash(req.body.walletPin, 12);
+  security.duressPinHash = await bcrypt.hash(req.body.duressPin, 12);
+  security.updatedAt = timestamp();
+  return ok(res, 'Wallet PINs saved', { configured: true });
+});
+router.get('/drivers/cng/pricing', (_req, res) => {
+  const pricing = db.cngPricingConfigs[0] || null;
+  return ok(res, 'Current CNG prepaid price', { pricing, configured: Boolean(pricing) });
+});
+router.post('/drivers/cng/prepaid', requireRole('driver'), validate(cngPrepaidSchema), async (req, res) => {
+  const driver = requireDriver(req, res);
+  if (!driver) return;
+  const security = db.walletSecurity.find((item) => item.driverId === driver.id);
+  if (!security?.walletPinHash || !security?.duressPinHash) {
+    return fail(res, 409, 'Set up your wallet PINs before buying prepaid CNG', 'WALLET_PIN_NOT_CONFIGURED');
+  }
+  if (await bcrypt.compare(req.body.pin, security.duressPinHash)) {
+    const alreadySignalled = db.sosEvents.some((event) => event.duressReference === req.body.clientReference);
+    if (!alreadySignalled) {
+      const location = driver.currentLocation || {};
+      db.sosEvents.push({
+        id: id(), driverId: driver.id, duressReference: req.body.clientReference,
+        latitude: Number.isFinite(Number(location.latitude)) ? Number(location.latitude) : null,
+        longitude: Number.isFinite(Number(location.longitude)) ? Number(location.longitude) : null,
+        note: 'Wallet duress PIN entered', status: 'open', createdAt: timestamp(),
+      });
+      driver.lastSosAt = timestamp();
+    }
+    // Deliberately keep the response indistinguishable from an ordinary pending request.
+    return ok(res, 'Prepaid request received', { status: 'processing' }, 202);
+  }
+  if (!(await bcrypt.compare(req.body.pin, security.walletPinHash))) {
+    return fail(res, 401, 'Invalid wallet PIN', 'INVALID_WALLET_PIN');
+  }
+  const previous = db.cngPrepaidOrders.find((order) => order.driverId === driver.id && order.clientReference === req.body.clientReference);
+  if (previous) return ok(res, 'Prepaid order already created', { order: previous }, 200);
+  const pricing = db.cngPricingConfigs[0];
+  if (!pricing?.pricePerUnit || !pricing?.unit) {
+    return fail(res, 503, 'CNG prepaid pricing is not configured yet', 'CNG_PRICING_NOT_CONFIGURED');
+  }
+  const pricePerUnit = Number(pricing.pricePerUnit);
+  const quantity = req.body.quantity ? Number(req.body.quantity.toFixed(3)) : Number((req.body.amount / pricePerUnit).toFixed(3));
+  const amount = req.body.amount ?? Math.ceil(quantity * pricePerUnit);
+  if (amount < 100) return fail(res, 400, 'Prepaid purchase must be at least ₦100', 'MINIMUM_PURCHASE');
+  let wallet = db.wallets.find((item) => item.driverId === driver.id);
+  if (!wallet) {
+    wallet = { id: id(), driverId: driver.id, balance: 0, createdAt: timestamp(), updatedAt: timestamp() };
+    db.wallets.push(wallet);
+  }
+  if (Number(wallet.balance) < amount) {
+    return fail(res, 409, 'Insufficient wallet balance', 'INSUFFICIENT_WALLET_BALANCE', { balance: Number(wallet.balance), required: amount });
+  }
+  const order = {
+    id: id(), driverId: driver.id, clientReference: req.body.clientReference,
+    quantity, unit: pricing.unit, amount, currency: 'NGN', pricePerUnit,
+    pricingVersion: pricing.version, status: 'paid_pending_redemption',
+    createdAt: timestamp(),
+  };
+  creditWallet(driver.id, -amount, order.id, 'cng_prepaid_purchase');
+  db.cngPrepaidOrders.push(order);
+  return ok(res, 'Prepaid CNG purchased', { order, walletBalance: wallet.balance }, 201);
+});
+
+// --- CNG Operations Routes ---
+
 router.get('/cng/unitconfig', (_req, res) => {
   return ok(res, 'CNG unit configuration', { unit: env.cngUnit });
 });
@@ -229,6 +321,8 @@ router.get('/cng/summary', requireRole('driver'), (req, res) => {
   });
 });
 
+// --- Ratings & Complaints Routes ---
+
 router.post('/ratings', requireRole('rider'), validate(ratingSchema), (req, res) => {
   const existing = db.ratings.some(
     (r) => r.rideId === req.body.rideId && r.riderId === req.user.id
@@ -266,6 +360,8 @@ router.post(
     return ok(res, 'Complaint submitted', { complaint }, 201);
   }
 );
+
+// --- Promotions & Notifications Routes ---
 
 router.post('/promo/validate', validate(promoSchema), (req, res) => {
   const promo = db.promotions.find(
@@ -315,6 +411,7 @@ router.post('/notifications/:id/read', (req, res) => {
   return ok(res, 'Notification marked read', { notification });
 });
 
+// --- Saved Places Routes ---
 
 router.get('/places/saved', (req, res) => {
   return ok(res, 'Saved places', {
@@ -347,6 +444,7 @@ router.delete('/places/saved/:id', (req, res) => {
   return ok(res, 'Saved place removed');
 });
 
+// --- Support Ticket Routes ---
 
 router.get('/support/tickets', (req, res) => {
   const tickets = db.supportTickets.filter((t) => t.userId === req.user.id);
@@ -366,18 +464,6 @@ router.post('/support/tickets', validate(supportTicketSchema), (req, res) => {
   return ok(res, 'Support ticket created', { ticket }, 201);
 });
 
-router.get('/support/tickets/:id/messages', (req, res) => {
-  const ticket = db.supportTickets.find(
-    (t) => t.id === req.params.id && t.userId === req.user.id
-  );
-  if (!ticket) {
-    return fail(res, 404, 'Support ticket not found', 'TICKET_NOT_FOUND');
-  }
-  const messages = [...(ticket.messages || [])].sort(
-    (a, b) => String(a.createdAt).localeCompare(String(b.createdAt))
-  );
-  return ok(res, 'Support ticket messages', { messages });
-});
 router.post('/support/tickets/:id/messages', validate(ticketMessageSchema), (req, res) => {
   const ticket = db.supportTickets.find(
     (t) => t.id === req.params.id && t.userId === req.user.id
@@ -399,6 +485,8 @@ router.post('/support/tickets/:id/messages', validate(ticketMessageSchema), (req
   return ok(res, 'Support message sent', { message }, 201);
 });
 
+// --- Account Management Routes ---
+
 router.delete('/account', (req, res) => {
   const user = db.users.find((u) => u.id === req.user.id);
   if (!user) return fail(res, 404, 'User not found', 'USER_NOT_FOUND');
@@ -414,3 +502,4 @@ router.delete('/account', (req, res) => {
 });
 
 export default router;
+

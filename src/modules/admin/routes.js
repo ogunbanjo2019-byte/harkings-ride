@@ -23,6 +23,12 @@ const pricingSchema = z.object({
   nightSurcharge: z.number().nonnegative().optional().default(0),
 });
 
+const cngPricingSchema = z.object({
+  unit: z.enum(['litre', 'kg']),
+  pricePerUnit: z.number().positive().max(100000),
+  currency: z.literal('NGN').default('NGN'),
+});
+
 const promotionSchema = z.object({
   code: z.string().min(2).max(40),
   type: z.enum(['percent', 'fixed']),
@@ -131,6 +137,28 @@ router.get('/pricing/report', (req, res) => {
       cashSurchargeCollected: rows.reduce((n, x) => n + x.cashSurchargeCollected, 0),
     },
   });
+});
+
+// --- CNG price configuration ---
+router.get('/cng-pricing', (_req, res) => {
+  const pricing = db.cngPricingConfigs[0] || null;
+  return ok(res, 'CNG pricing', { pricing, configured: Boolean(pricing) });
+});
+router.put('/cng-pricing', validate(cngPricingSchema), (req, res) => {
+  const old = db.cngPricingConfigs[0];
+  const pricing = {
+    id: old?.id || id(),
+    ...req.body,
+    currency: 'NGN',
+    version: Number(old?.version || 0) + 1,
+    updatedAt: timestamp(),
+    updatedBy: req.user.id,
+    createdAt: old?.createdAt || timestamp(),
+  };
+  if (old) Object.assign(old, pricing);
+  else db.cngPricingConfigs.push(pricing);
+  audit(req, 'update', 'cng-pricing', pricing.id, { unit: pricing.unit, pricePerUnit: pricing.pricePerUnit, version: pricing.version });
+  return ok(res, 'CNG price updated for new prepaid orders', { pricing });
 });
 
 // --- Promotions Routes ---

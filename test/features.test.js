@@ -13,6 +13,11 @@ await connectDatabase();
 const reset = () => Object.values(db).forEach((items) => (items.length = 0));
 const auth = (token) => ({ Authorization: `Bearer ${token}` });
 
+const driver = async () =>
+  (await request(app).post('/api/v1/auth/register').send({
+    name: 'Feature Driver', email: 'driver-features@example.com',
+    phone: '+234800000714', password: 'Password123!', role: 'driver'
+  })).body.data;
 const rider = async () =>
   (
     await request(app).post('/api/v1/auth/register').send({
@@ -144,3 +149,34 @@ test('browser SSE receives a one-use, ride-scoped stream ticket', async () => {
   assert.ok(!JSON.stringify(db.sseTokens).includes(response.body.data.token));
 });
 
+
+test('driver can buy prepaid CNG by units or amount and duress PIN signals SOS discreetly', async () => {
+  const jwt = (await import('jsonwebtoken')).default;
+  const { env } = await import('../src/config/env.js');
+  const { creditWallet } = await import('../src/database/store.js');
+  db.users.push({ id: 'admin-cng-feature', role: 'admin', status: 'active' });
+  const adminToken = jwt.sign({ sub: 'admin-cng-feature', role: 'admin' }, env.jwtSecret);
+  const configured = await request(app).put('/api/v1/admin/cng-pricing')
+    .set(auth(adminToken)).send({ unit: 'litre', pricePerUnit: 200 });
+  assert.equal(configured.status, 200);
+  const user = await driver();
+  const profile = await request(app).get('/api/v1/drivers/profile').set(auth(user.accessToken));
+  const driverId = profile.body.data.driver.id;
+  assert.equal(JSON.stringify(profile.body).includes('walletPinHash'), false);
+  const pins = await request(app).put('/api/v1/drivers/wallet/pin')
+    .set(auth(user.accessToken)).send({ walletPin: '1234', duressPin: '9876' });
+  assert.equal(pins.status, 200);
+  creditWallet(driverId, 1000, 'test-credit', 'funding');
+  const purchase = await request(app).post('/api/v1/drivers/cng/prepaid')
+    .set(auth(user.accessToken)).send({ quantity: 1, pin: '1234', clientReference: 'cng-order-0001' });
+  assert.equal(purchase.status, 201);
+  assert.equal(purchase.body.data.order.amount, 200);
+  assert.equal(purchase.body.data.order.status, 'paid_pending_redemption');
+  assert.equal(purchase.body.data.walletBalance, 800);
+  const duress = await request(app).post('/api/v1/drivers/cng/prepaid')
+    .set(auth(user.accessToken)).send({ amount: 100, pin: '9876', clientReference: 'cng-duress-0001' });
+  assert.equal(duress.status, 202);
+  assert.equal(duress.body.data.status, 'processing');
+  assert.equal(db.sosEvents.filter((event) => event.driverId === driverId).length, 1);
+  assert.equal(db.wallets.find((wallet) => wallet.driverId === driverId).balance, 800);
+});
