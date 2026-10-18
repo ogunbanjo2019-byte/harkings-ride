@@ -47,6 +47,16 @@ export const db = Object.fromEntries(collectionNames.map((name) => [name, []]));
 export const id = () => randomUUID();
 export const timestamp = () => new Date().toISOString();
 
+export const notifyUser = (userId, { title, body, kind, data = {} }) => {
+  if (!userId) return null;
+  const notification = {
+    id: id(), userId, type: kind || 'general', kind: kind || 'general',
+    title, body, data, isRead: false, createdAt: timestamp(),
+  };
+  db.notifications.push(notification);
+  return notification;
+};
+
 let client;
 let connected = false;
 let persistenceQueue = Promise.resolve();

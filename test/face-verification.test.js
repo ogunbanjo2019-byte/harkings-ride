@@ -417,7 +417,7 @@ test('driver can cancel only their own pending face-verification session', async
 
 // --- Integration Tests: Subscription & Production Safety Guards ---
 
-test('production refuses a driver-submitted subscription reference without provider verification', async () => {
+test('production requires wallet balance for subscription payment', async () => {
   const registered = await request(app)
     .post('/api/v1/auth/register')
     .send({
@@ -440,7 +440,8 @@ test('production refuses a driver-submitted subscription reference without provi
         paymentReference: 'fake-unverified-reference'
       });
 
-    assert.equal(response.status, 503);
+    assert.equal(response.status, 409);
+    assert.equal(response.body.error.code, 'INSUFFICIENT_WALLET_BALANCE');
     assert.equal(db.subscriptions.length, 0);
   } finally {
     env.isProduction = previous;

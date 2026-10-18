@@ -100,6 +100,9 @@ router.post('/status', validate(updateStatusSchema), (req, res) => {
   const driver = requireDriver(req, res);
   if (!driver) return;
 
+  if (req.body.isOnline && driver.status === 'suspended') {
+    return fail(res, 403, 'This driver account is suspended.', 'DRIVER_SUSPENDED');
+  }
   if (
     req.body.isOnline &&
     (driver.status !== 'active' || driver.verificationStatus !== 'approved')

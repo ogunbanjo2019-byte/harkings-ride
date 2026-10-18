@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { env } from '../../config/env.js';
 import { validate } from '../../middleware/errors.js';
 import { getPricing, savePricing } from '../../services/pricing.js';
-import { db, findRide, findUser, id, timestamp } from '../../database/store.js';
+import { db, findRide, findUser, id, notifyUser, timestamp } from '../../database/store.js';
 import { asyncHandler, fail, ok, paginate } from '../../shared/core.js';
 import { requireAuth, requireRole, requireAdminMfa } from '../../middleware/auth.js';
 import { sendEmail } from '../../services/email.js';
@@ -114,6 +114,13 @@ function reviewDriver(req, res, status) {
   driver.verificationStatus = status;
   driver.status = status === 'approved' ? 'active' : 'pending';
   driver.reviewedAt = timestamp();
+  driver.reviewNote = req.body.note || null;
+  notifyUser(driver.userId, {
+    title: status === 'approved' ? 'Driver application approved' : 'Driver application rejected',
+    body: status === 'approved' ? 'Your driver account has been approved.' : 'Your driver application was rejected.',
+    kind: status === 'approved' ? 'driver_approved' : 'driver_rejected',
+    data: { driverId: driver.id, note: driver.reviewNote },
+  });
 
   audit(req, status, 'driver', driver.id);
   return ok(res, `Driver ${status}`, { driver });
@@ -342,6 +349,41 @@ router.get('/drivers', (req, res) => {
   return ok(res, 'Drivers', paginate(drivers, req.query.page, req.query.limit));
 });
 
+router.get('/rides/:id/messages', (req, res) => {
+  const ride = findRide(req.params.id);
+  if (!ride) return fail(res, 404, 'Ride not found', 'RIDE_NOT_FOUND');
+  const messages = (db.chatMessages || []).filter((message) => message.rideId === ride.id)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+  return ok(res, 'Ride messages', { rideId: ride.id, messages });
+});
+
+router.get('/support/tickets', (req, res) =>
+  ok(res, 'Support tickets', paginate(db.supportTickets, req.query.page, req.query.limit))
+);
+
+router.post('/support/tickets/:id/messages', (req, res) => {
+  const ticket = db.supportTickets.find((item) => item.id === req.params.id);
+  const message = String(req.body.message || '').trim();
+  if (!ticket) return fail(res, 404, 'Support ticket not found', 'TICKET_NOT_FOUND');
+  if (!message || message.length > 3000) return fail(res, 400, 'Message is required and must be at most 3000 characters.', 'INVALID_MESSAGE');
+  ticket.messages ||= [];
+  const reply = { id: id(), userId: req.user.id, senderRole: 'admin', message, createdAt: timestamp() };
+  ticket.messages.push(reply);
+  ticket.updatedAt = reply.createdAt;
+  notifyUser(ticket.userId, { title: 'Support replied', body: message, kind: 'support_reply', data: { ticketId: ticket.id } });
+  return ok(res, 'Support reply sent', { message: reply }, 201);
+});
+
+router.put('/support/tickets/:id/close', (req, res) => {
+  const ticket = db.supportTickets.find((item) => item.id === req.params.id);
+  if (!ticket) return fail(res, 404, 'Support ticket not found', 'TICKET_NOT_FOUND');
+  ticket.status = 'closed';
+  ticket.closedAt = timestamp();
+  ticket.closedBy = req.user.id;
+  notifyUser(ticket.userId, { title: 'Support ticket closed', body: 'Your support ticket has been closed.', kind: 'support_closed', data: { ticketId: ticket.id } });
+  return ok(res, 'Support ticket closed', { ticket });
+});
+
 router.put('/drivers/:id/approve', (req, res) => reviewDriver(req, res, 'approved'));
 router.put('/drivers/:id/reject', (req, res) => reviewDriver(req, res, 'rejected'));
 
@@ -351,6 +393,11 @@ router.put('/drivers/:id/suspend', (req, res) => {
 
   driver.status = 'suspended';
   driver.onlineStatus = false;
+  notifyUser(driver.userId, {
+    title: 'Driver account suspended',
+    body: 'Your driver account has been suspended. Contact support for help.',
+    kind: 'driver_suspended', data: { driverId: driver.id },
+  });
   audit(req, 'suspend', 'driver', driver.id);
 
   return ok(res, 'Driver suspended', { driver });
@@ -389,6 +436,11 @@ router.put('/drivers/:id/verification-review', (req, res) => {
   driver.status = status === 'approved' ? 'active' : 'pending';
   driver.reviewedAt = timestamp();
   driver.reviewNote = req.body.note || null;
+  notifyUser(driver.userId, {
+    title: status === 'approved' ? 'Driver application approved' : status === 'rejected' ? 'Driver application rejected' : 'Driver review updated',
+    body: status === 'approved' ? 'Your driver account has been approved.' : status === 'rejected' ? 'Your driver application was rejected.' : 'Your driver verification is still under review.',
+    kind: `driver_${status}`, data: { driverId: driver.id, note: req.body.note || null },
+  });
 
   db.documents
     .filter((doc) => doc.driverId === driver.id && req.body.reviewDocuments !== false)

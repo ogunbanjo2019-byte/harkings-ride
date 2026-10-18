@@ -628,16 +628,12 @@ router.post('/subscription/pay', validate(subscriptionPaySchema), (req, res) => 
   const driver = requireDriver(req, res);
   if (!driver) return;
 
-  if (env.isProduction) {
-    return fail(
-      res,
-      503,
-      'Driver subscription settlement is not integrated with a verified payment provider yet.',
-      'SUBSCRIPTION_PAYMENT_NOT_CONFIGURED'
-    );
-  }
-
   const days = req.body.days || 1;
+  const amount = env.dailyFee * days;
+  const wallet = walletFor(driver);
+  if (Number(wallet.balance) < amount) {
+    return fail(res, 409, 'Insufficient wallet balance for subscription payment.', 'INSUFFICIENT_WALLET_BALANCE', { balance: wallet.balance, required: amount });
+  }
   const now = new Date();
   const current = activeSubscription(driver);
   const startsAt = current ? new Date(current.expiresAt) : now;
@@ -653,7 +649,7 @@ router.post('/subscription/pay', validate(subscriptionPaySchema), (req, res) => 
     driverId: driver.id,
     status: 'active',
     days,
-    amount: env.dailyFee * days,
+    amount,
     currency: 'NGN',
     paymentReference: reference,
     startsAt: startsAt.toISOString(),
@@ -662,6 +658,9 @@ router.post('/subscription/pay', validate(subscriptionPaySchema), (req, res) => 
   };
 
   db.subscriptions.push(subscription);
+  wallet.balance -= amount;
+  wallet.updatedAt = timestamp();
+  db.walletTransactions.push({ id: id(), driverId: driver.id, type: 'subscription_payment', amount: -amount, balanceAfter: wallet.balance, reference, createdAt: timestamp() });
   db.payments.push({
     id: id(),
     driverId: driver.id,

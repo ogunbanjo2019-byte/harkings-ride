@@ -117,6 +117,10 @@ router.post('/subscriptions/pay', requireRole('driver'), (req, res) => {
   const driver = requireDriver(req, res);
   if (!driver) return;
 
+  const wallet = db.wallets.find((item) => item.driverId === driver.id);
+  if (!wallet || Number(wallet.balance) < env.dailyFee) {
+    return fail(res, 409, 'Insufficient wallet balance for subscription payment.', 'INSUFFICIENT_WALLET_BALANCE', { balance: Number(wallet?.balance || 0), required: env.dailyFee });
+  }
   const startsAt = timestamp();
   const expiresAt = new Date(Date.now() + 86400000).toISOString();
 
@@ -132,11 +136,14 @@ router.post('/subscriptions/pay', requireRole('driver'), (req, res) => {
   };
 
   db.subscriptions.push(subscription);
+  wallet.balance -= env.dailyFee;
+  wallet.updatedAt = timestamp();
   db.walletTransactions.push({
     id: id(),
     driverId: driver.id,
     type: 'subscription_payment',
-    amount: env.dailyFee,
+    amount: -env.dailyFee,
+    balanceAfter: wallet.balance,
     createdAt: startsAt,
   });
 
@@ -495,6 +502,7 @@ router.post('/support/tickets/:id/messages', validate(ticketMessageSchema), (req
   const message = {
     id: id(),
     userId: req.user.id,
+    senderRole: req.user.role,
     message: req.body.message,
     createdAt: timestamp(),
   };

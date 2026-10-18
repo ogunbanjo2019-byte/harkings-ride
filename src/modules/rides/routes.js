@@ -9,6 +9,7 @@ import {
   findDriverByUser,
   findRide,
   id,
+  notifyUser,
   timestamp,
   transitionAllowed,
 } from '../../database/store.js';
@@ -205,6 +206,17 @@ const transition = (expectedRole, nextStatus) => (req, res) => {
   }
 
   emitRideEvent(ride, nextStatus);
+  if (nextStatus === 'completed') {
+    notifyUser(ride.riderId, {
+      title: 'Ride completed', body: 'Your trip has been completed.',
+      kind: 'ride_completed', data: { rideId: ride.id },
+    });
+    const assignedDriver = db.drivers.find((item) => item.id === ride.driverId);
+    if (assignedDriver) notifyUser(assignedDriver.userId, {
+      title: 'Ride completed', body: 'Your trip has been completed.',
+      kind: 'ride_completed', data: { rideId: ride.id },
+    });
+  }
 
   return ok(res, `Ride marked ${nextStatus}`, { ride });
 };
@@ -235,8 +247,7 @@ router.get('/', requireRole('rider', 'driver', 'admin'), (req, res) => {
       const offeredToThisDriver =
         ride.status === 'requested' &&
         ride.driverId == null &&
-        Array.isArray(ride.candidateDriverIds) &&
-        ride.candidateDriverIds.includes(driver.id) &&
+        canReceiveRequests &&
         !(ride.declinedDriverIds || []).includes(driver.id);
 
       return alreadyAssigned || offeredToThisDriver;
@@ -327,10 +338,7 @@ router.post('/:id/accept', requireRole('driver'), (req, res) => {
     return fail(res, 409, 'Ride is no longer available', 'RIDE_UNAVAILABLE');
   }
 
-  if (
-    !(ride.candidateDriverIds || []).includes(driver.id) ||
-    (ride.declinedDriverIds || []).includes(driver.id)
-  ) {
+  if ((ride.declinedDriverIds || []).includes(driver.id)) {
     return fail(
       res,
       403,
@@ -343,6 +351,10 @@ router.post('/:id/accept', requireRole('driver'), (req, res) => {
   ride.status = 'accepted';
   ride.acceptedAt = timestamp();
   ride.updatedAt = timestamp();
+  notifyUser(ride.riderId, {
+    title: 'Driver accepted your ride', body: 'Your ride request has been accepted.',
+    kind: 'ride_accepted', data: { rideId: ride.id, driverId: driver.id },
+  });
 
   emitRideEvent(ride, 'accepted');
 
@@ -358,7 +370,7 @@ router.post('/:id/decline', requireRole('driver'), (req, res) => {
     return fail(res, 409, 'Ride is no longer available', 'RIDE_UNAVAILABLE');
   }
 
-  if (!driver || !(ride.candidateDriverIds || []).includes(driver.id)) {
+  if (!driver || !eligibleDrivers().some((candidate) => candidate.id === driver.id)) {
     return fail(res, 403, 'This ride was not offered to this driver', 'RIDE_NOT_OFFERED_TO_DRIVER');
   }
   if (!(ride.declinedDriverIds || []).includes(driver.id)) {
@@ -429,6 +441,11 @@ router.post('/:id/cancel', requireRole('rider', 'driver'), (req, res) => {
     ride.status = 'requested';
     ride.driverCancelledAt = cancelledAt;
     ride.updatedAt = cancelledAt;
+    notifyUser(ride.riderId, {
+      title: 'Ride reopened for matching',
+      body: 'Your driver cancelled. We are looking for another driver now.',
+      kind: 'ride_cancelled', data: { rideId: ride.id, cancelledBy: 'driver' },
+    });
 
     emitRideEvent(ride, 'cancelled', {
       cancelledBy: 'driver',
@@ -464,6 +481,17 @@ router.post('/:id/cancel', requireRole('rider', 'driver'), (req, res) => {
   ride.cancelledAt = timestamp();
   ride.cancellationFee = cancellationFee;
   ride.updatedAt = ride.cancelledAt;
+  notifyUser(ride.riderId, {
+    title: 'Ride cancelled', body: 'Your ride request has been cancelled.',
+    kind: 'ride_cancelled', data: { rideId: ride.id, cancelledBy: 'rider' },
+  });
+  if (isRiderOwner && ride.driverId) {
+    const assignedDriver = db.drivers.find((item) => item.id === ride.driverId);
+    if (assignedDriver) notifyUser(assignedDriver.userId, {
+      title: 'Ride cancelled', body: 'The rider cancelled this trip.',
+      kind: 'ride_cancelled', data: { rideId: ride.id, cancelledBy: 'rider' },
+    });
+  }
 
   if (cancellationFee > 0) {
     db.payments.push({
