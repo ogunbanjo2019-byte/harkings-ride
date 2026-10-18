@@ -15,8 +15,8 @@ services:
         value: supabase
       - key: JWT_SECRET
         sync: false
-      - key: CORS_ORIGIN
-        sync: false
+      - key: CORS_ORIGINS
+        value: https://switchride-driver-app.vercel.app,https://switchride-rider-app-sihq.vercel.app,http://localhost:5173
       - key: APP_PUBLIC_URL
         sync: false
       - key: SUPABASE_URL
@@ -27,6 +27,10 @@ services:
         value: sensitive-documents
       - key: EMAIL_PROVIDER
         value: resend
+      - key: EMAIL_VERIFICATION_REQUIRED
+        value: "true"
+      - key: ADMIN_MFA_REQUIRED
+        value: "true"
       - key: EMAIL_FROM
         sync: false
       - key: RESEND_API_KEY
@@ -45,3 +49,7 @@ services:
         value: "90"
       - key: FACE_CONSENT_VERSION
         value: face-check-v1
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYSTACK_CALLBACK_URL
+        sync: false

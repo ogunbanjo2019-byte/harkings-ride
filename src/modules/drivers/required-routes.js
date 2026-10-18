@@ -50,13 +50,7 @@ const verifySchema = z.object({
 
 const closeSchema = z.object({
   password: z.string().min(1).max(128),
-  reason: z.enum([
-    "I'm no longer driving",
-    'I am switching platforms',
-    'I am taking a break',
-    'Other',
-  ]).optional(),
-  acknowledged_records_kept: z.literal(true),
+  reason: z.string().trim().max(500).optional(),
 });
 
 async function paystack(path, body, method = 'POST') {
@@ -346,7 +340,9 @@ router.post(
 
     if (
       providerData?.status === 'success' &&
-      Number(providerData.amount) === payment.amount * 100
+      Number(providerData.amount) === payment.amount * 100 &&
+      providerData.reference === payment.reference &&
+      providerData.currency === 'NGN'
     ) {
       payment.status = 'successful';
       payment.verifiedAt = timestamp();
@@ -361,6 +357,13 @@ router.post(
         status: 'success',
         amount: payment.amount,
       });
+    }
+
+    if (providerData?.status === 'success') {
+      payment.status = 'verification_mismatch';
+      payment.providerResponse = providerData;
+      payment.updatedAt = timestamp();
+      return fail(res, 409, 'Provider payment details do not match this top-up.', 'PAYMENT_DETAILS_MISMATCH');
     }
 
     if (
@@ -404,7 +407,7 @@ router.post(
       (ride) => ride.driverId === driver.id
     );
 
-    if (driverRides.some((ride) => ride.status === 'in_progress')) {
+    if (driverRides.some((ride) => ['accepted', 'arrived', 'in_progress'].includes(ride.status))) {
       return fail(res, 409, 'Finish your current trip first.', 'ACTIVE_RIDE');
     }
 
@@ -438,7 +441,7 @@ router.post(
       (payment) =>
         (payment.driverId === driver.id || payment.userId === user.id) &&
         ['pending', 'unpaid'].includes(payment.status) &&
-        ['subscription', 'fee', 'driver_fee'].includes(payment.type)
+        ['subscription', 'driver_subscription', 'fee', 'driver_fee'].includes(payment.type)
     );
 
     const owed =
@@ -458,6 +461,7 @@ router.post(
 
     user.statusBeforeClosure = user.status;
     user.status = 'closed';
+    user.tokenVersion = Number(user.tokenVersion || 0) + 1;
     user.closedAt = closedAt;
     user.closeReason = req.body.reason || null;
     user.updatedAt = closedAt;

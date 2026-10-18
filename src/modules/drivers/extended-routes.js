@@ -7,6 +7,7 @@ import { db, findDriverByUser, findRide, id, timestamp } from '../../database/st
 import { fail, ok, paginate, asyncHandler } from '../../shared/core.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { validate } from '../../middleware/errors.js';
+import { recordWalletDuressAlert, verifyDriverWalletPin } from '../../services/wallet-pin.js';
 import {
   storePrivateFile,
   signedPrivateUrl,
@@ -37,6 +38,19 @@ const faceSessionLimiter = rateLimit({
     message: 'Too many face-verification sessions. Try again later.',
     data: null,
     error: { code: 'FACE_SESSION_RATE_LIMITED', details: null },
+  },
+});
+const faceCompleteLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 12,
+  keyGenerator: (req) => req.user.id,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many face-verification checks. Wait briefly and retry.',
+    data: null,
+    error: { code: 'FACE_RESULT_RATE_LIMITED', details: null },
   },
 });
 router.use(requireAuth, requireRole('driver'));
@@ -117,6 +131,7 @@ const bankAccountSchema = z.object({
 
 const withdrawSchema = z.object({
   amount: z.number().int().positive(),
+  pin: z.string().regex(/^\d{4,6}$/),
   bankAccount: z
     .object({
       bankCode: z.string().min(3),
@@ -127,33 +142,25 @@ const withdrawSchema = z.object({
 });
 
 const cngLogSchema = z.object({
-  quantity: z.number().positive(), amount: z.number().nonnegative().optional(), cost: z.number().nonnegative().optional(),
-  unit: z.string().min(1).max(20).optional(), station: z.string().max(120).optional(), station_location: z.string().max(120).optional(),
+  quantity: z.number().positive(),
+  pricePerUnit: z.number().positive(),
+  unit: z.enum(['litres', 'litre', 'kg', 'scm']).transform((unit) => unit === 'litre' ? 'litres' : unit),
+  updatedAt: z.string().datetime(),
+  station: z.string().max(120).optional(), station_location: z.string().max(120).optional(),
   odometer: z.number().nonnegative().optional(), filledAt: z.string().datetime().optional(),
-}).transform((v) => ({ ...v, amount: v.amount ?? v.cost ?? 0, station: v.station ?? v.station_location }));
+}).transform((v) => ({ ...v, station: v.station ?? v.station_location }));
 
 
 router.get('/verification/status', (req, res) => {
   const driver = requireDriver(req, res);
   if (!driver) return;
-
-  const documents = db.documents
-    .filter((document) => document.driverId === driver.id)
-    .map(({ storage, ...document }) => ({
-      ...document,
-      storage: storage ? { bucket: storage.bucket, path: storage.path } : null,
-    }));
-
-  return ok(res, 'Verification status', {
-    driverStatus: driver.verificationStatus,
-    identity: driver.verification
-      ? {
-          ...driver.verification,
-          nin: driver.verification.nin ? { ...driver.verification.nin, value: undefined } : undefined,
-        }
-      : null,
-    documents,
-  });
+  const hasSubmittedVerification = db.documents.some((item) => item.driverId === driver.id) ||
+    Boolean(driver.verification?.nin?.submittedAt || driver.verification?.selfie?.submittedAt) ||
+    db.identityChecks.some((item) => item.driverId === driver.id);
+  const status = driver.verificationStatus === 'approved' || driver.verificationStatus === 'rejected'
+    ? driver.verificationStatus
+    : hasSubmittedVerification ? 'pending' : 'not_started';
+  return ok(res, 'Verification status', { status });
 });
 
 router.post('/verification/nin', validate(ninSchema), (req, res) => {
@@ -394,6 +401,7 @@ router.post('/verification/face/cancel', validate(sessionOnlySchema), (req, res)
 
 router.post(
   '/verification/face/complete',
+  faceCompleteLimiter,
   validate(sessionOnlySchema),
   asyncHandler(async (req, res) => {
     const driver = requireDriver(req, res);
@@ -708,12 +716,39 @@ router.post('/wallet/withdraw', validate(withdrawSchema), (req, res) => {
     return fail(res, 400, 'Bank account is required before withdrawal', 'BANK_ACCOUNT_REQUIRED');
   }
 
-  if (wallet.balance < req.body.amount) {
-    return fail(res, 400, 'Insufficient wallet balance', 'INSUFFICIENT_BALANCE');
-  }
+  const security = db.walletSecurity.find((item) => item.driverId === driver.id);
+  const pinCheck = verifyDriverWalletPin({ driver, security, pin: req.body.pin });
+  // Verify asynchronously without leaking which of the two secret PINs was matched.
+  return Promise.resolve(pinCheck).then((checked) => {
+    if (checked.result === 'not_configured') {
+      return fail(res, 409, 'Set up your wallet PINs before withdrawing.', 'WALLET_PIN_NOT_CONFIGURED');
+    }
+    if (checked.result === 'invalid') {
+      return fail(res, 401, 'Invalid wallet PIN.', 'INVALID_WALLET_PIN', { attemptsRemaining: checked.attemptsRemaining });
+    }
+    if (checked.result === 'locked') {
+      res.set('Retry-After', String(checked.retryAfterSeconds));
+      return fail(res, 423, 'Wallet PIN is locked. Try again after the lock expires.', 'PIN_LOCKED', { retryAfterSeconds: checked.retryAfterSeconds });
+    }
 
-  wallet.balance -= req.body.amount;
-  wallet.updatedAt = timestamp();
+    if (checked.result === 'duress') {
+      const withdrawal = {
+        id: id(), driverId: driver.id, amount: req.body.amount, currency: 'NGN',
+        status: 'pending', bankAccount: wallet.bankAccount, createdAt: timestamp(),
+      };
+      recordWalletDuressAlert(driver, withdrawal.id, 'withdrawal');
+      return ok(res, 'Withdrawal requested', {
+        withdrawal: { ...withdrawal, bankAccount: safeBank(withdrawal.bankAccount) },
+        balance: wallet.balance,
+      }, 201);
+    }
+
+    if (wallet.balance < req.body.amount) {
+      return fail(res, 400, 'Insufficient wallet balance', 'INSUFFICIENT_BALANCE');
+    }
+
+    wallet.balance -= req.body.amount;
+    wallet.updatedAt = timestamp();
 
   const withdrawal = {
     id: id(),
@@ -736,12 +771,13 @@ router.post('/wallet/withdraw', validate(withdrawSchema), (req, res) => {
     createdAt: withdrawal.createdAt,
   });
 
-  return ok(
-    res,
-    'Withdrawal requested',
-    { withdrawal: { ...withdrawal, bankAccount: safeBank(withdrawal.bankAccount) }, balance: wallet.balance },
-    201
-  );
+    return ok(
+      res,
+      'Withdrawal requested',
+      { withdrawal: { ...withdrawal, bankAccount: safeBank(withdrawal.bankAccount) }, balance: wallet.balance },
+      201
+    );
+  });
 });
 
 router.get('/wallet/withdrawals', (req, res) => {
@@ -767,12 +803,26 @@ router.post('/cng/log', validate(cngLogSchema), (req, res) => {
   const driver = requireDriver(req, res);
   if (!driver) return;
 
+  const pricing = db.cngPricingConfigs[0];
+  if (!pricing || !Number.isFinite(Number(pricing.pricePerUnit))) {
+    return fail(res, 503, 'CNG pricing is not configured yet.', 'CNG_PRICING_NOT_CONFIGURED');
+  }
+  const currentUnit = pricing.unit === 'litre' ? 'litres' : pricing.unit;
+  if (Number(req.body.pricePerUnit) !== Number(pricing.pricePerUnit) || req.body.unit !== currentUnit || req.body.updatedAt !== pricing.updatedAt) {
+    return fail(res, 409, 'CNG price changed. Refresh the current price and try again.', 'PRICE_CHANGED', {
+      pricePerUnit: Number(pricing.pricePerUnit), unit: currentUnit, updatedAt: pricing.updatedAt || null,
+    });
+  }
+
   const transaction = {
     id: id(),
     driverId: driver.id,
     quantity: req.body.quantity,
-    amount: req.body.amount,
-    unit: req.body.unit || env.cngUnit,
+    price_per_unit: Number(pricing.pricePerUnit),
+    pricePerUnit: Number(pricing.pricePerUnit),
+    unit: currentUnit,
+    cost: Math.round(req.body.quantity * Number(pricing.pricePerUnit) * 100) / 100,
+    amount: Math.round(req.body.quantity * Number(pricing.pricePerUnit) * 100) / 100,
     station: req.body.station || null,
     odometer: req.body.odometer ?? null,
     filledAt: req.body.filledAt || timestamp(),

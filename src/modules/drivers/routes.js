@@ -114,6 +114,18 @@ router.post('/status', validate(updateStatusSchema), (req, res) => {
   if (req.body.isOnline && driver.vehicleVerificationStatus !== 'verified') {
     return fail(res, 403, 'Vehicle plate and registration document must be verified before going online.', 'VEHICLE_NOT_VERIFIED');
   }
+  if (req.body.isOnline && env.isProduction && driver.verification?.nin?.status !== 'verified') {
+    return fail(res, 403, 'NIN must be verified before going online.', 'NIN_NOT_VERIFIED');
+  }
+  if (
+    req.body.isOnline &&
+    env.isProduction &&
+    !db.identityChecks.some(
+      (check) => check.driverId === driver.id && check.type === 'aws_face_liveness' && check.status === 'approved'
+    )
+  ) {
+    return fail(res, 403, 'Face verification must pass before going online.', 'FACE_NOT_VERIFIED');
+  }
 
   driver.onlineStatus = req.body.isOnline;
 
@@ -131,6 +143,13 @@ router.post('/status', validate(updateStatusSchema), (req, res) => {
 router.post('/location', validate(updateLocationSchema), (req, res) => {
   const driver = requireDriver(req, res);
   if (!driver) return;
+
+  if (req.body.rideId) {
+    const ride = db.rides.find((item) => item.id === req.body.rideId);
+    if (!ride || ride.driverId !== driver.id || !['accepted', 'arrived', 'in_progress'].includes(ride.status)) {
+      return fail(res, 404, 'Active ride not found for this driver', 'RIDE_NOT_FOUND');
+    }
+  }
 
   driver.currentLocation = {
     ...req.body,
@@ -248,3 +267,4 @@ router.get('/earnings', (req, res) => {
 });
 
 export default router;
+  

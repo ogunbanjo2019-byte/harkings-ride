@@ -2,10 +2,11 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { env } from '../../config/env.js';
-import { db, findDriverByUser, id, timestamp, creditWallet } from '../../database/store.js';
+import { db, findDriverByUser, findUser, id, timestamp, creditWallet } from '../../database/store.js';
 import { fail, ok, paginate } from '../../shared/core.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { validate } from '../../middleware/errors.js';
+import { recordWalletDuressAlert, verifyDriverWalletPin } from '../../services/wallet-pin.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -36,8 +37,12 @@ const withdrawalSchema = z.object({
 const walletPinsSchema = z.object({
   walletPin: z.string().regex(/^\d{4,6}$/),
   duressPin: z.string().regex(/^\d{4,6}$/),
+  currentPin: z.string().regex(/^\d{4,6}$/).optional(),
+  password: z.string().min(1).max(128).optional(),
 }).refine((value) => value.walletPin !== value.duressPin, {
   message: 'Wallet PIN and duress PIN must be different',
+}).refine((value) => !value.currentPin || (value.walletPin !== value.currentPin && value.duressPin !== value.currentPin), {
+  message: 'New PINs must not match the current wallet PIN',
 });
 const cngPrepaidSchema = z.object({
   quantity: z.number().positive().max(10000).optional(),
@@ -213,15 +218,38 @@ router.put('/drivers/wallet/pin', requireRole('driver'), validate(walletPinsSche
   const driver = requireDriver(req, res);
   if (!driver) return;
   let security = db.walletSecurity.find((item) => item.driverId === driver.id);
+  if (security?.walletPinHash || security?.duressPinHash) {
+    const user = findUser({ id: req.user.id });
+    const currentPinValid = req.body.currentPin && security.walletPinHash &&
+      await bcrypt.compare(req.body.currentPin, security.walletPinHash);
+    const passwordValid = req.body.password && user?.passwordHash &&
+      await bcrypt.compare(req.body.password, user.passwordHash);
+    if (!currentPinValid && !passwordValid) {
+      return fail(res, 401, 'Enter your current wallet PIN or account password to change your PINs.', 'PIN_REAUTHENTICATION_REQUIRED');
+    }
+  }
   if (!security) { security = { id: id(), driverId: driver.id, createdAt: timestamp() }; db.walletSecurity.push(security); }
   security.walletPinHash = await bcrypt.hash(req.body.walletPin, 12);
   security.duressPinHash = await bcrypt.hash(req.body.duressPin, 12);
+  security.pinFailedAttempts = 0;
+  security.pinLockedUntil = null;
   security.updatedAt = timestamp();
   return ok(res, 'Wallet PINs saved', { configured: true });
 });
+router.get('/drivers/wallet/pin/status', requireRole('driver'), (req, res) => {
+  const driver = requireDriver(req, res);
+  if (!driver) return;
+  const security = db.walletSecurity.find((item) => item.driverId === driver.id);
+  return ok(res, 'Wallet PIN status', { configured: Boolean(security?.walletPinHash && security?.duressPinHash) });
+});
 router.get('/drivers/cng/pricing', (_req, res) => {
   const pricing = db.cngPricingConfigs[0] || null;
-  return ok(res, 'Current CNG prepaid price', { pricing, configured: Boolean(pricing) });
+  return ok(res, 'Current CNG prepaid price', {
+    pricePerUnit: pricing ? Number(pricing.pricePerUnit) : null,
+    unit: pricing?.unit === 'litre' ? 'litres' : (pricing?.unit || env.cngUnit),
+    presets: pricing?.presets || [],
+    updatedAt: pricing?.updatedAt || null,
+  });
 });
 router.post('/drivers/cng/prepaid', requireRole('driver'), validate(cngPrepaidSchema), async (req, res) => {
   const driver = requireDriver(req, res);
@@ -230,24 +258,14 @@ router.post('/drivers/cng/prepaid', requireRole('driver'), validate(cngPrepaidSc
   if (!security?.walletPinHash || !security?.duressPinHash) {
     return fail(res, 409, 'Set up your wallet PINs before buying prepaid CNG', 'WALLET_PIN_NOT_CONFIGURED');
   }
-  if (await bcrypt.compare(req.body.pin, security.duressPinHash)) {
-    const alreadySignalled = db.sosEvents.some((event) => event.duressReference === req.body.clientReference);
-    if (!alreadySignalled) {
-      const location = driver.currentLocation || {};
-      db.sosEvents.push({
-        id: id(), driverId: driver.id, duressReference: req.body.clientReference,
-        latitude: Number.isFinite(Number(location.latitude)) ? Number(location.latitude) : null,
-        longitude: Number.isFinite(Number(location.longitude)) ? Number(location.longitude) : null,
-        note: 'Wallet duress PIN entered', status: 'open', createdAt: timestamp(),
-      });
-      driver.lastSosAt = timestamp();
-    }
+  const pinCheck = await verifyDriverWalletPin({ driver, security, pin: req.body.pin });
+  if (pinCheck.result === 'locked') return fail(res, 423, 'Wallet PIN is locked. Try again after the lock expires.', 'PIN_LOCKED', { retryAfterSeconds: pinCheck.retryAfterSeconds });
+  if (pinCheck.result === 'duress') {
+    recordWalletDuressAlert(driver, req.body.clientReference, 'cng_prepaid');
     // Deliberately keep the response indistinguishable from an ordinary pending request.
     return ok(res, 'Prepaid request received', { status: 'processing' }, 202);
   }
-  if (!(await bcrypt.compare(req.body.pin, security.walletPinHash))) {
-    return fail(res, 401, 'Invalid wallet PIN', 'INVALID_WALLET_PIN');
-  }
+  if (pinCheck.result === 'invalid') return fail(res, 401, 'Invalid wallet PIN', 'INVALID_WALLET_PIN', { attemptsRemaining: pinCheck.attemptsRemaining });
   const previous = db.cngPrepaidOrders.find((order) => order.driverId === driver.id && order.clientReference === req.body.clientReference);
   if (previous) return ok(res, 'Prepaid order already created', { order: previous }, 200);
   const pricing = db.cngPricingConfigs[0];
@@ -502,4 +520,3 @@ router.delete('/account', (req, res) => {
 });
 
 export default router;
-

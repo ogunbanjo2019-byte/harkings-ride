@@ -1,10 +1,11 @@
 import { Router } from 'express';
 import { z } from 'zod';
+import { env } from '../../config/env.js';
 import { validate } from '../../middleware/errors.js';
 import { getPricing, savePricing } from '../../services/pricing.js';
 import { db, findRide, findUser, id, timestamp } from '../../database/store.js';
 import { asyncHandler, fail, ok, paginate } from '../../shared/core.js';
-import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { requireAuth, requireRole, requireAdminMfa } from '../../middleware/auth.js';
 import { sendEmail } from '../../services/email.js';
 import { submitIdentityCheck, updateIdentityCheck } from '../../services/identity.js';
 import { enqueueJob } from '../../services/jobs.js';
@@ -12,7 +13,7 @@ import { isValidVehiclePlate, normalizeVehiclePlate } from '../../services/vehic
 import { signedPrivateUrl } from '../../services/storage.js';
 
 const router = Router();
-router.use(requireAuth, requireRole('admin'));
+router.use(requireAuth, requireRole('admin'), requireAdminMfa);
 
 // --- Validation Schemas ---
 
@@ -26,8 +27,9 @@ const pricingSchema = z.object({
 });
 
 const cngPricingSchema = z.object({
-  unit: z.enum(['litre', 'kg']),
+  unit: z.enum(['litres', 'litre', 'kg', 'scm']).transform((unit) => unit === 'litre' ? 'litres' : unit),
   pricePerUnit: z.number().positive().max(100000),
+  presets: z.array(z.number().int().positive().max(1000000)).max(12).optional(),
   currency: z.literal('NGN').default('NGN'),
 });
 const vehicleReviewSchema = z.object({
@@ -59,8 +61,24 @@ const audit = (req, action, resource, resourceId, metadata = {}) => {
 
 const safeUser = (user) => {
   if (!user) return null;
-  const { passwordHash, ...publicRecord } = user;
+  const { passwordHash, tokenVersion, adminMfaSecret, adminMfaPending, ...publicRecord } = user;
   return publicRecord;
+};
+
+const productionIdentityReady = (driver, res) => {
+  if (!env.isProduction) return true;
+  if (driver.verification?.nin?.status !== 'verified') {
+    fail(res, 409, 'NIN must be verified before approving a driver.', 'NIN_NOT_VERIFIED');
+    return false;
+  }
+  const faceApproved = db.identityChecks.some(
+    (item) => item.driverId === driver.id && item.type === 'aws_face_liveness' && item.status === 'approved'
+  );
+  if (!faceApproved) {
+    fail(res, 409, 'Face verification must pass before approving a driver.', 'FACE_NOT_VERIFIED');
+    return false;
+  }
+  return true;
 };
 
 const driverView = (driver) => ({
@@ -91,6 +109,7 @@ const csv = (rows) => {
 function reviewDriver(req, res, status) {
   const driver = db.drivers.find((d) => d.id === req.params.id);
   if (!driver) return fail(res, 404, 'Driver not found', 'DRIVER_NOT_FOUND');
+  if (status === 'approved' && !productionIdentityReady(driver, res)) return;
 
   driver.verificationStatus = status;
   driver.status = status === 'approved' ? 'active' : 'pending';
@@ -148,13 +167,17 @@ router.get('/pricing/report', (req, res) => {
 // --- CNG price configuration ---
 router.get('/cng-pricing', (_req, res) => {
   const pricing = db.cngPricingConfigs[0] || null;
-  return ok(res, 'CNG pricing', { pricing, configured: Boolean(pricing) });
+  return ok(res, 'CNG pricing', {
+    pricing: pricing ? { ...pricing, presets: pricing.presets || [] } : null,
+    configured: Boolean(pricing),
+  });
 });
 router.put('/cng-pricing', validate(cngPricingSchema), (req, res) => {
   const old = db.cngPricingConfigs[0];
   const pricing = {
     id: old?.id || id(),
     ...req.body,
+    presets: req.body.presets || old?.presets || [],
     currency: 'NGN',
     version: Number(old?.version || 0) + 1,
     updatedAt: timestamp(),
@@ -360,6 +383,7 @@ router.put('/drivers/:id/verification-review', (req, res) => {
     ? req.body.status
     : null;
   if (!status) return fail(res, 400, 'Status must be approved, rejected, or pending', 'INVALID_STATUS');
+  if (status === 'approved' && !productionIdentityReady(driver, res)) return;
 
   driver.verificationStatus = status;
   driver.status = status === 'approved' ? 'active' : 'pending';
@@ -583,6 +607,9 @@ router.put('/wallet/withdrawals/:id', (req, res) => {
 router.post('/wallet/withdrawals/:id/process', (req, res) => {
   const withdrawal = db.withdrawals.find((item) => item.id === req.params.id);
   if (!withdrawal) return fail(res, 404, 'Withdrawal not found', 'WITHDRAWAL_NOT_FOUND');
+  if (withdrawal.status !== 'approved') {
+    return fail(res, 409, 'Withdrawal must be approved before payout processing.', 'WITHDRAWAL_NOT_APPROVED');
+  }
 
   const job = enqueueJob(
     'payout.process',

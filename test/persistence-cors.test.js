@@ -5,15 +5,16 @@ import request from 'supertest';
 
 process.env.NODE_ENV = 'test';
 process.env.DATABASE_PROVIDER = 'memory';
-process.env.CORS_ORIGIN = 'https://switchride-driver-app.vercel.app,https://switchride-rider-app-sihq.vercel.app';
+process.env.CORS_ORIGINS = 'https://switchride-driver-app.vercel.app,https://switchride-rider-app-sihq.vercel.app,http://localhost:5173';
 
 const { default: app } = await import('../src/app.js');
 const { createPersistenceMiddleware } = await import('../src/middleware/persistence.js');
 
-test('CORS reflects only the requesting allowlisted Vercel origin', async () => {
+test('CORS preflight reflects allowed origins and permits app methods and headers before auth', async () => {
   for (const origin of [
     'https://switchride-driver-app.vercel.app',
     'https://switchride-rider-app-sihq.vercel.app',
+    'http://localhost:5173',
   ]) {
     const response = await request(app)
       .options('/api/v1/auth/login')
@@ -23,6 +24,14 @@ test('CORS reflects only the requesting allowlisted Vercel origin', async () => 
 
     assert.equal(response.status, 204);
     assert.equal(response.headers['access-control-allow-origin'], origin);
+    assert.match(response.headers['access-control-allow-methods'], /GET/);
+    assert.match(response.headers['access-control-allow-methods'], /POST/);
+    assert.match(response.headers['access-control-allow-methods'], /PUT/);
+    assert.match(response.headers['access-control-allow-methods'], /PATCH/);
+    assert.match(response.headers['access-control-allow-methods'], /DELETE/);
+    assert.match(response.headers['access-control-allow-methods'], /OPTIONS/);
+    assert.match(response.headers['access-control-allow-headers'].toLowerCase(), /content-type/);
+    assert.match(response.headers['access-control-allow-headers'].toLowerCase(), /authorization/);
   }
 });
 

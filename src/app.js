@@ -1,4 +1,4 @@
-import express from 'express';
+  import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import cors from 'cors';
@@ -32,10 +32,22 @@ import { realtimeHealth } from './services/realtime.js';
 
 const app = express();
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
-const allowedOrigins = env.corsOrigin
-  .split(',')
-  .map((origin) => origin.trim().replace(/\/+$/, ''))
-  .filter(Boolean);
+const allowedOrigins = env.corsOrigins;
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes('*')) return callback(null, '*');
+    return callback(null, allowedOrigins.includes(origin) ? origin : false);
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false,
+  optionsSuccessStatus: 204,
+};
+morgan.token('safe-url', (req) => String(req.originalUrl || req.url || '').split('?')[0]);
+const requestLogFormat = env.isProduction
+  ? ':remote-addr - :method :safe-url :status :res[content-length] :response-time ms'
+  : ':method :safe-url :status :res[content-length] :response-time ms';
 
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -45,16 +57,8 @@ app.use(
     contentSecurityPolicy: env.isProduction ? undefined : false,
   })
 );
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-      if (env.corsOrigin.trim() === '*') return callback(null, '*');
-      return callback(null, allowedOrigins.includes(origin) ? origin : false);
-    },
-    credentials: false,
-  })
-);
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 app.use(
   express.json({
     limit: '1mb',
@@ -64,7 +68,7 @@ app.use(
   })
 );
 app.use(express.urlencoded({ extended: true, limit: '100kb' }));
-app.use(morgan(env.isProduction ? 'combined' : 'dev'));
+app.use(morgan(requestLogFormat));
 app.use(createPersistenceMiddleware(persistToDatabase));
 
 app.use(

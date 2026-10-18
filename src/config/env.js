@@ -1,5 +1,9 @@
 if (process.env.NODE_ENV !== 'test') await import('dotenv/config')
 const isProduction = process.env.NODE_ENV === 'production';
+const emailVerificationRequired = process.env.EMAIL_VERIFICATION_REQUIRED === 'true' ||
+  (isProduction && process.env.EMAIL_VERIFICATION_REQUIRED !== 'false');
+const adminMfaRequired = process.env.ADMIN_MFA_REQUIRED === 'true' ||
+  (isProduction && process.env.ADMIN_MFA_REQUIRED !== 'false');
 const configuredJwtSecret = process.env.JWT_SECRET || '';
 const requiredProduction = (name, value) => {
   if (isProduction && !value) {
@@ -12,9 +16,12 @@ if (isProduction && configuredJwtSecret.length < 32) {
   throw new Error('JWT_SECRET must be set to at least 32 characters in production.');
 }
 
-const corsOrigin = process.env.CORS_ORIGIN || (isProduction ? '' : '*');
-if (isProduction && (corsOrigin === '*' || !/^https:\/\//.test(corsOrigin))) {
-  throw new Error('CORS_ORIGIN must be an exact HTTPS origin in production.');
+const corsOrigins = (process.env.CORS_ORIGINS || process.env.CORS_ORIGIN ||
+  (isProduction ? '' : '*'))
+  .split(',').map((origin) => origin.trim().replace(/\/+$/, '')).filter(Boolean);
+if (isProduction && (!corsOrigins.length || corsOrigins.includes('*') || corsOrigins.some((origin) =>
+  !/^https:\/\//.test(origin) && !/^http:\/\/localhost(?::\d+)?$/.test(origin)))) {
+  throw new Error('CORS_ORIGINS must contain exact HTTPS origins (localhost may use HTTP).');
 }
 
 const appPublicUrl =
@@ -76,10 +83,12 @@ if (identityProvider === 'aws-rekognition') {
 
 export const env = {
   isProduction,
+  emailVerificationRequired,
+  adminMfaRequired,
   port: Number(process.env.PORT || 4000),
   jwtSecret: configuredJwtSecret || 'development-only-secret-change-me',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
-  corsOrigin,
+  corsOrigins,
   dailyFee: Number(process.env.DAILY_DRIVER_SUBSCRIPTION_FEE || 1500),
   cngUnit: process.env.DEFAULT_CNG_UNIT || 'kg',
   databaseProvider:

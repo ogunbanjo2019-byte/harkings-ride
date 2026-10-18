@@ -220,6 +220,16 @@ router.get('/', requireRole('rider', 'driver', 'admin'), (req, res) => {
       return fail(res, 404, 'Driver profile not found', 'DRIVER_NOT_FOUND');
     }
 
+    const canReceiveRequests = eligibleDrivers().some((candidate) => candidate.id === driver.id);
+    if (canReceiveRequests) {
+      for (const ride of db.rides) {
+        if (ride.status === 'requested' && !ride.driverId && !(ride.declinedDriverIds || []).includes(driver.id)) {
+          ride.candidateDriverIds ||= [];
+          if (!ride.candidateDriverIds.includes(driver.id)) ride.candidateDriverIds.push(driver.id);
+        }
+      }
+    }
+
     rides = db.rides.filter((ride) => {
       const alreadyAssigned = ride.driverId === driver.id;
       const offeredToThisDriver =
@@ -343,11 +353,15 @@ router.post('/:id/decline', requireRole('driver'), (req, res) => {
   const ride = findRide(req.params.id);
   const driver = findDriverByUser(req.user.id);
 
-  if (!ride || ride.status !== 'requested') {
+  if (!ride) return fail(res, 404, 'Ride not found', 'RIDE_NOT_FOUND');
+  if (ride.status !== 'requested' || ride.driverId) {
     return fail(res, 409, 'Ride is no longer available', 'RIDE_UNAVAILABLE');
   }
 
-  if (driver?.id) {
+  if (!driver || !(ride.candidateDriverIds || []).includes(driver.id)) {
+    return fail(res, 403, 'This ride was not offered to this driver', 'RIDE_NOT_OFFERED_TO_DRIVER');
+  }
+  if (!(ride.declinedDriverIds || []).includes(driver.id)) {
     ride.declinedDriverIds = [...(ride.declinedDriverIds || []), driver.id];
   }
 
