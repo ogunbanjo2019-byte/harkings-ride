@@ -32,6 +32,15 @@ export const requireAuth = (req, res, next) => {
       return fail(res, 401, 'Account is not active', 'ACCOUNT_INACTIVE');
     }
 
+    if (env.emailVerificationRequired && user.email && !user.emailVerifiedAt) {
+      return fail(res, 403, 'Verify your email address before using this account.', 'EMAIL_NOT_VERIFIED');
+    }
+
+    if (Number(payload.ver || 0) !== Number(user.tokenVersion || 0)) {
+      return fail(res, 401, 'Session has been revoked. Please sign in again.', 'SESSION_REVOKED');
+    }
+
+    req.authPayload = payload;
     req.user = publicUser(user);
     next();
   } catch {
@@ -50,4 +59,16 @@ export const requireRole = (...roles) => (req, res, next) => {
     'You do not have permission to perform this action',
     'FORBIDDEN'
   );
+};
+
+export const requireAdminMfa = (req, res, next) => {
+  if (req.user?.role !== 'admin' || !env.adminMfaRequired) return next();
+  const user = findUser({ id: req.user.id });
+  if (!user?.adminMfaEnabled) {
+    return fail(res, 403, 'Admin MFA enrollment is required before using admin operations.', 'ADMIN_MFA_ENROLLMENT_REQUIRED');
+  }
+  if (req.authPayload?.mfa !== true) {
+    return fail(res, 401, 'Sign in with an authenticator code to continue.', 'ADMIN_MFA_REQUIRED');
+  }
+  return next();
 };
