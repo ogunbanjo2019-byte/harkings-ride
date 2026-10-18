@@ -1,7 +1,6 @@
 if (process.env.NODE_ENV !== 'test') await import('dotenv/config')
 const isProduction = process.env.NODE_ENV === 'production';
-const emailVerificationRequired = process.env.EMAIL_VERIFICATION_REQUIRED === 'true' ||
-  (isProduction && process.env.EMAIL_VERIFICATION_REQUIRED !== 'false');
+const emailVerificationRequired = process.env.EMAIL_VERIFICATION_REQUIRED === 'true';
 const adminMfaRequired = process.env.ADMIN_MFA_REQUIRED === 'true' ||
   (isProduction && process.env.ADMIN_MFA_REQUIRED !== 'false');
 const configuredJwtSecret = process.env.JWT_SECRET || '';
@@ -32,8 +31,8 @@ if (isProduction && !/^https:\/\//.test(appPublicUrl)) {
 }
 
 const emailProvider = process.env.EMAIL_PROVIDER || 'development';
-if (isProduction && !['resend', 'smtp'].includes(emailProvider)) {
-  throw new Error('EMAIL_PROVIDER must be resend or smtp in production.');
+if (isProduction && !['development', 'resend', 'smtp'].includes(emailProvider)) {
+  throw new Error('EMAIL_PROVIDER must be development, resend, or smtp in production.');
 }
 
 if (isProduction && emailProvider === 'resend') {
