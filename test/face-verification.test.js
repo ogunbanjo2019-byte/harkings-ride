@@ -14,6 +14,7 @@ const {
   getLivenessResults,
   compareLivenessFaceToDocument
 } = await import('../src/services/face-verification.js');
+const { setPrivateFileDownloaderForTests } = await import('../src/services/storage.js');
 
 // --- Helpers ---
 const auth = (token) => ({ Authorization: `Bearer ${token}` });
@@ -86,6 +87,106 @@ test('liveness result retrieval requests only the supplied session ID', async ()
 
 // --- Integration Tests: Driver Face Verification API ---
 
+test('NIN submission accepts only 11 digits and a pending NIN blocks face-session creation', async () => {
+  const registered = await request(app)
+    .post('/api/v1/auth/register')
+    .send({
+      name: 'Pending NIN Driver',
+      email: 'pending-nin@example.com',
+      phone: '+234800001229',
+      password: 'Password123!',
+      role: 'driver', vehiclePlateNumber: 'TST-009AA'
+    });
+  assert.equal(registered.status, 201);
+  const token = registered.body.data.accessToken;
+
+  const malformed = await request(app)
+    .post('/api/v1/drivers/verification/nin')
+    .set(auth(token))
+    .send({ nin: '12345' });
+  assert.equal(malformed.status, 400);
+
+  const submitted = await request(app)
+    .post('/api/v1/drivers/verification/nin')
+    .set(auth(token))
+    .send({ nin: '12345678901' });
+  assert.equal(submitted.status, 202);
+  const driver = db.drivers.find((item) => item.userId === registered.body.data.user.id);
+  assert.equal(driver.verification.nin.status, 'pending');
+  assert.equal(Object.hasOwn(driver.verification.nin, 'value'), false);
+
+  const faceSession = await request(app)
+    .post('/api/v1/drivers/verification/face/session')
+    .set(auth(token))
+    .send({
+      documentId: 'doc-not-needed-before-nin-gate',
+      biometricConsent: true,
+      consentVersion: env.faceConsentVersion
+    });
+  assert.equal(faceSession.status, 409);
+  assert.equal(faceSession.body.error.code, 'NIN_NOT_VERIFIED');
+  assert.equal(db.identityChecks.length, 0);
+});
+
+test('a live face mismatch with the uploaded identity document is rejected', async () => {
+  const registered = await request(app)
+    .post('/api/v1/auth/register')
+    .send({
+      name: 'Face Mismatch Driver',
+      email: 'face-mismatch@example.com',
+      phone: '+234800001231',
+      password: 'Password123!',
+      role: 'driver', vehiclePlateNumber: 'TST-011AA'
+    });
+  assert.equal(registered.status, 201);
+  const driver = db.drivers.find((item) => item.userId === registered.body.data.user.id);
+  driver.verification = { nin: { status: 'verified' } };
+  db.documents.push({
+    id: 'nin-document-mismatch',
+    driverId: driver.id,
+    mimeType: 'image/jpeg',
+    storage: { stored: true, path: 'drivers/test/nin.jpg' }
+  });
+  db.identityChecks.push({
+    id: 'face-mismatch-check',
+    driverId: driver.id,
+    type: 'aws_face_liveness',
+    providerReference: 'face-mismatch-session-123456',
+    status: 'provider_pending',
+    metadata: { documentId: 'nin-document-mismatch' },
+    createdAt: new Date().toISOString()
+  });
+
+  setPrivateFileDownloaderForTests(async () => new Uint8Array([3, 4]));
+  setRekognitionClientForTests({
+    send: async (command) => {
+      if (command.constructor.name === 'GetFaceLivenessSessionResultsCommand') {
+        return { Status: 'SUCCEEDED', Confidence: 99, ReferenceImage: { Bytes: new Uint8Array([1, 2]) } };
+      }
+      if (command.constructor.name === 'CompareFacesCommand') {
+        return { FaceMatches: [{ Similarity: 30 }] };
+      }
+      throw new Error(`Unexpected Rekognition command: ${command.constructor.name}`);
+    }
+  });
+
+  try {
+    const response = await request(app)
+      .post('/api/v1/drivers/verification/face/complete')
+      .set(auth(registered.body.data.accessToken))
+      .send({ sessionId: 'face-mismatch-session-123456' });
+    assert.equal(response.status, 422);
+    assert.equal(response.body.error.code, 'FACE_MISMATCH');
+    assert.equal(response.body.error.details.status, 'rejected');
+    assert.equal(db.identityChecks[0].status, 'rejected');
+    assert.equal(db.identityChecks[0].resultCode, 'FACE_MISMATCH');
+    assert.notEqual(response.body.error.details.status, 'approved');
+  } finally {
+    setPrivateFileDownloaderForTests(undefined);
+    setRekognitionClientForTests(undefined);
+  }
+});
+
 test('driver face session requires explicit consent and rejects when provider is not configured', async () => {
   setRekognitionClientForTests(undefined);
 
@@ -101,6 +202,8 @@ test('driver face session requires explicit consent and rejects when provider is
 
   assert.equal(registered.status, 201);
   const token = registered.body.data.accessToken;
+  const driver = db.drivers.find((item) => item.userId === registered.body.data.user.id);
+  driver.verification = { nin: { status: 'verified', verifiedAt: new Date().toISOString() } };
 
   const noConsent = await request(app)
     .post('/api/v1/drivers/verification/face/session')
@@ -133,6 +236,8 @@ test('face session requires the deployed consent notice revision', async () => {
       password: 'Password123!',
       role: 'driver', vehiclePlateNumber: 'TST-002AA'
     });
+  const driver = db.drivers.find((item) => item.userId === registered.body.data.user.id);
+  driver.verification = { nin: { status: 'verified', verifiedAt: new Date().toISOString() } };
 
   const previous = env.identityProvider;
   env.identityProvider = 'aws-rekognition';
@@ -154,6 +259,46 @@ test('face session requires the deployed consent notice revision', async () => {
   }
 });
 
+test('face-session completion fails closed when the NIN is not verified', async () => {
+  const registered = await request(app)
+    .post('/api/v1/auth/register')
+    .send({
+      name: 'NIN Completion Gate Driver',
+      email: 'nin-completion-gate@example.com',
+      phone: '+234800001230',
+      password: 'Password123!',
+      role: 'driver', vehiclePlateNumber: 'TST-010AA'
+    });
+  assert.equal(registered.status, 201);
+  const driver = db.drivers.find((item) => item.userId === registered.body.data.user.id);
+  driver.verification = { nin: { status: 'pending' } };
+  db.identityChecks.push({
+    id: 'pending-face-check',
+    driverId: driver.id,
+    type: 'aws_face_liveness',
+    providerReference: 'nin-gate-session-123456',
+    status: 'provider_pending',
+    metadata: { documentId: 'doc-1' },
+    createdAt: new Date().toISOString()
+  });
+
+  let providerCalls = 0;
+  setRekognitionClientForTests({ send: async () => { providerCalls += 1; return {}; } });
+  try {
+    const response = await request(app)
+      .post('/api/v1/drivers/verification/face/complete')
+      .set(auth(registered.body.data.accessToken))
+      .send({ sessionId: 'nin-gate-session-123456' });
+    assert.equal(response.status, 409);
+    assert.equal(response.body.error.code, 'NIN_NOT_VERIFIED');
+    assert.equal(db.identityChecks[0].status, 'failed');
+    assert.equal(db.identityChecks[0].resultCode, 'NIN_NOT_VERIFIED');
+    assert.equal(providerCalls, 0);
+  } finally {
+    setRekognitionClientForTests(undefined);
+  }
+});
+
 test('a pending face session is never resumed for a different identity document', async () => {
   const registered = await request(app)
     .post('/api/v1/auth/register')
@@ -163,9 +308,10 @@ test('a pending face session is never resumed for a different identity document'
       phone: '+234800001227',
       password: 'Password123!',
       role: 'driver', vehiclePlateNumber: 'TST-003AA'
-    });
+  });
 
   const driver = db.drivers.find((item) => item.userId === registered.body.data.user.id);
+  driver.verification = { nin: { status: 'verified', verifiedAt: new Date().toISOString() } };
   db.documents.push(
     {
       id: 'document-old',

@@ -1,6 +1,11 @@
 import { createClient } from '@supabase/supabase-js';
 import { env } from '../config/env.js';
 let client;
+let privateFileDownloaderForTests;
+
+export const setPrivateFileDownloaderForTests = (downloader) => {
+  privateFileDownloaderForTests = downloader;
+};
 
 const storageClient = () => {
   if (!env.supabaseUrl || !env.supabaseServiceRoleKey) {
@@ -90,6 +95,8 @@ export const signedPrivateUrl = async (path, expiresIn = env.signedUrlTtlSeconds
 };
 
 export const downloadPrivateFile = async (path) => {
+  if (privateFileDownloaderForTests) return privateFileDownloaderForTests(path);
+
   const supabase = storageClient();
   if (!supabase) {
     throw Object.assign(new Error('Private document storage is not configured'), { 

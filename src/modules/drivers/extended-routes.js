@@ -89,7 +89,7 @@ const coordinateSchema = z.object({
 });
 
 const ninSchema = z.object({
-  nin: z.string().min(5).max(30),
+  nin: z.string().trim().regex(/^\d{11}$/, 'NIN must contain exactly 11 digits'),
 });
 
 const faceSessionSchema = z.object({
@@ -160,9 +160,17 @@ router.post('/verification/nin', validate(ninSchema), (req, res) => {
   const driver = requireDriver(req, res);
   if (!driver) return;
 
+  for (const check of db.identityChecks.filter(
+    (item) => item.driverId === driver.id && item.type === 'aws_face_liveness' && item.status === 'provider_pending'
+  )) {
+    Object.assign(check, { status: 'failed', resultCode: 'NIN_RESUBMITTED', updatedAt: timestamp() });
+  }
+
   driver.verification = {
     ...(driver.verification || {}),
-    nin: { value: req.body.nin, status: 'pending', submittedAt: timestamp() },
+    // The raw NIN is not persisted. It must be verified by an authorized
+    // server-side provider before any face-verification session can start.
+    nin: { status: 'pending', submittedAt: timestamp() },
   };
 
   return ok(
@@ -248,6 +256,10 @@ router.post(
   asyncHandler(async (req, res) => {
     const driver = requireDriver(req, res);
     if (!driver) return;
+
+    if (driver.verification?.nin?.status !== 'verified') {
+      return fail(res, 409, 'Verify your NIN before starting face verification.', 'NIN_NOT_VERIFIED');
+    }
 
     if (env.identityProvider !== 'aws-rekognition') {
       return fail(res, 503, 'AWS face verification is not configured', 'FACE_PROVIDER_NOT_CONFIGURED');
@@ -396,6 +408,13 @@ router.post(
 
     if (!check) return fail(res, 404, 'Face-verification session not found', 'FACE_SESSION_NOT_FOUND');
 
+    if (driver.verification?.nin?.status !== 'verified') {
+      if (check.status === 'provider_pending') {
+        Object.assign(check, { status: 'failed', resultCode: 'NIN_NOT_VERIFIED', updatedAt: timestamp() });
+      }
+      return fail(res, 409, 'Verify your NIN before completing face verification.', 'NIN_NOT_VERIFIED');
+    }
+
     if (check.status !== 'provider_pending') {
       return ok(res, 'Face verification already processed', {
         status: check.status,
@@ -465,25 +484,49 @@ router.post(
     }
 
     const livenessConfidence = Number(result.Confidence || 0);
-    const passed = livenessConfidence >= env.faceLivenessThreshold && comparison.matched;
+    const livenessPassed = livenessConfidence >= env.faceLivenessThreshold;
+    const passed = livenessPassed && comparison.matched;
+    const completedAt = timestamp();
+
+    if (!passed) {
+      const resultCode = livenessPassed ? 'FACE_MISMATCH' : 'FACE_LIVENESS_FAILED';
+      Object.assign(check, {
+        status: 'rejected',
+        resultCode,
+        livenessConfidence,
+        faceSimilarity: comparison.similarity,
+        livenessThreshold: env.faceLivenessThreshold,
+        faceMatchThreshold: env.faceMatchSimilarityThreshold,
+        reviewRequired: false,
+        completedAt,
+        updatedAt: completedAt,
+      });
+      return fail(
+        res,
+        422,
+        livenessPassed
+          ? 'Live face did not match the identity document. Verification cannot continue.'
+          : 'Face liveness check did not pass. Verification cannot continue.',
+        resultCode,
+        { status: 'rejected' }
+      );
+    }
 
     Object.assign(check, {
-      status: passed ? 'approved' : 'manual_review',
+      status: 'approved',
       livenessConfidence,
       faceSimilarity: comparison.similarity,
       livenessThreshold: env.faceLivenessThreshold,
       faceMatchThreshold: env.faceMatchSimilarityThreshold,
-      reviewRequired: !passed,
-      completedAt: timestamp(),
-      updatedAt: timestamp(),
+      reviewRequired: false,
+      completedAt,
+      updatedAt: completedAt,
     });
 
     return ok(
       res,
-      passed
-        ? 'Automated face checks passed; driver documents still require their normal review'
-        : 'Face verification requires manual review',
-      { status: check.status, reviewRequired: !passed, driverApprovalChanged: false }
+      'Automated face checks passed; driver documents still require their normal review',
+      { status: check.status, reviewRequired: false, driverApprovalChanged: false }
     );
   })
 );
