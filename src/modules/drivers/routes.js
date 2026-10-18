@@ -7,6 +7,7 @@ import { asyncHandler, fail, ok, paginate } from '../../shared/core.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { validate } from '../../middleware/errors.js';
 import { storePrivateFile, validateUpload } from '../../services/storage.js';
+import { isValidVehiclePlate, normalizeVehiclePlate } from '../../services/vehicle-plate.js';
 
 const router = Router();
 
@@ -31,7 +32,7 @@ const updateProfileSchema = z.object({
   name: z.string().min(2).max(120).optional(),
   email: z.string().email().optional(),
   phone: z.string().min(7).max(30).optional(),
-  vehiclePlateNumber: z.string().min(2).max(30).optional(),
+  vehiclePlateNumber: z.string().trim().min(7).max(10).optional().refine((value) => !value || isValidVehiclePlate(value), 'Enter a valid plate in the format ABC-123XY'),
 });
 
 const updateStatusSchema = z.object({
@@ -69,8 +70,27 @@ router.get('/profile', (req, res) => {
 router.put('/profile', validate(updateProfileSchema), (req, res) => {
   const user = findUser({ id: req.user.id });
   if (!user) return fail(res, 404, 'User not found', 'USER_NOT_FOUND');
-
-  Object.assign(user, req.body, { updatedAt: timestamp() });
+  const { vehiclePlateNumber: submittedPlate, ...profile } = req.body;
+  let driver;
+  let plate;
+  if (submittedPlate) {
+    driver = driverOf(req);
+    if (!driver) return fail(res, 404, 'Driver profile not found', 'DRIVER_NOT_FOUND');
+    plate = normalizeVehiclePlate(submittedPlate);
+    const duplicate = db.drivers.some((item) => item.id !== driver.id && normalizeVehiclePlate(item.vehiclePlateNumber) === plate);
+    if (duplicate) return fail(res, 409, 'This vehicle plate is already registered.', 'VEHICLE_PLATE_IN_USE');
+  }
+  Object.assign(user, profile, { updatedAt: timestamp() });
+  if (submittedPlate) {
+    if (driver.vehiclePlateNumber !== plate) {
+      driver.vehiclePlateNumber = plate;
+      driver.vehicleVerificationStatus = 'pending';
+      driver.vehicleVerifiedAt = null;
+      driver.vehicleReviewNote = null;
+      driver.updatedAt = timestamp();
+      user.vehiclePlateNumber = plate;
+    }
+  }
 
   return ok(res, 'Driver profile updated', { user });
 });
@@ -90,6 +110,9 @@ router.post('/status', validate(updateStatusSchema), (req, res) => {
       'Driver must be approved before going online',
       'DRIVER_NOT_APPROVED'
     );
+  }
+  if (req.body.isOnline && driver.vehicleVerificationStatus !== 'verified') {
+    return fail(res, 403, 'Vehicle plate and registration document must be verified before going online.', 'VEHICLE_NOT_VERIFIED');
   }
 
   driver.onlineStatus = req.body.isOnline;

@@ -96,7 +96,7 @@ test('enforces approval and subscription before accepting rides', async () => {
     email: 'driver@example.com', 
     phone: '+234800000004', 
     password: 'Password123!', 
-    role: 'driver' 
+    role: 'driver', vehiclePlateNumber: 'TST-001AA' 
   }); 
 
   const ride = await request(app)
@@ -131,13 +131,14 @@ test('runs the approved driver ride lifecycle', async () => {
     email: 'driver2@example.com', 
     phone: '+234800000006', 
     password: 'Password123!', 
-    role: 'driver' 
+    role: 'driver', vehiclePlateNumber: 'TST-002AA' 
   }); 
 
   // Setup driver active subscription & approval status
   const driverRecord = db.drivers.find((d) => d.userId === driver.user.id); 
   driverRecord.status = 'active'; 
   driverRecord.verificationStatus = 'approved'; 
+  driverRecord.vehicleVerificationStatus = 'verified';
   
   db.subscriptions.push({ 
     id: 'sub-1', 
@@ -211,4 +212,3 @@ test('sends and verifies a single-use email OTP', async () => {
 
   assert.equal(replay.status, 400); 
 });
-

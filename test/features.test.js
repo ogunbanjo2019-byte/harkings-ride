@@ -16,7 +16,7 @@ const auth = (token) => ({ Authorization: `Bearer ${token}` });
 const driver = async () =>
   (await request(app).post('/api/v1/auth/register').send({
     name: 'Feature Driver', email: 'driver-features@example.com',
-    phone: '+234800000714', password: 'Password123!', role: 'driver'
+    phone: '+234800000714', password: 'Password123!', role: 'driver', vehiclePlateNumber: 'TST-001AA'
   })).body.data;
 const rider = async () =>
   (
@@ -179,4 +179,65 @@ test('driver can buy prepaid CNG by units or amount and duress PIN signals SOS d
   assert.equal(duress.body.data.status, 'processing');
   assert.equal(db.sosEvents.filter((event) => event.driverId === driverId).length, 1);
   assert.equal(db.wallets.find((wallet) => wallet.driverId === driverId).balance, 800);
+});
+
+test('driver wallet funding initiation is rate-limited', async () => {
+  const user = await driver();
+  const responses = [];
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    responses.push(await request(app)
+      .post('/api/v1/drivers/wallet/fund/initiate')
+      .set(auth(user.accessToken))
+      .send({}));
+  }
+  assert.equal(responses.slice(0, 5).every((response) => response.status === 400), true);
+  assert.equal(responses[5].status, 429);
+  assert.equal(responses[5].body.error.code, 'WALLET_FUNDING_RATE_LIMITED');
+});
+
+
+test('driver plate must match basic format and vehicle must be admin-verified with approved registration document', async () => {
+  const jwt = (await import('jsonwebtoken')).default;
+  const { env } = await import('../src/config/env.js');
+  const adminId = 'admin-vehicle-review';
+  db.users.push({ id: adminId, role: 'admin', status: 'active' });
+  const adminToken = jwt.sign({ sub: adminId, role: 'admin' }, env.jwtSecret);
+  const invalid = await request(app).post('/api/v1/auth/register').send({
+    name: 'Bad Plate Driver', email: 'bad-plate@example.com', phone: '+234800000715',
+    password: 'Password123!', role: 'driver', vehiclePlateNumber: 'NOT-A-PLATE'
+  });
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.body.message, /Validation failed/);
+
+  const registered = await request(app).post('/api/v1/auth/register').send({
+    name: 'Review Driver', email: 'review-plate@example.com', phone: '+234800000716',
+    password: 'Password123!', role: 'driver', plateNumber: 'ABC123XY'
+  });
+  assert.equal(registered.status, 201);
+  const driver = db.drivers.find((item) => item.userId === registered.body.data.user.id);
+  assert.equal(driver.vehiclePlateNumber, 'ABC-123XY');
+  assert.equal(driver.vehicleVerificationStatus, 'pending');
+  driver.status = 'active';
+  driver.verificationStatus = 'approved';
+  const driverToken = registered.body.data.accessToken;
+  const blocked = await request(app).post('/api/v1/drivers/status')
+    .set(auth(driverToken)).send({ isOnline: true });
+  assert.equal(blocked.status, 403);
+  assert.equal(blocked.body.error.code, 'VEHICLE_NOT_VERIFIED');
+
+  const missingDocument = await request(app).put(`/api/v1/admin/drivers/${driver.id}/vehicle-review`)
+    .set(auth(adminToken)).send({ status: 'verified' });
+  assert.equal(missingDocument.status, 409);
+  assert.equal(missingDocument.body.error.code, 'VEHICLE_DOCUMENT_NOT_APPROVED');
+  db.documents.push({
+    id: 'vehicle-registration-test', driverId: driver.id,
+    documentType: 'vehicle_registration', status: 'approved',
+  });
+  const reviewed = await request(app).put(`/api/v1/admin/drivers/${driver.id}/vehicle-review`)
+    .set(auth(adminToken)).send({ status: 'verified', note: 'Plate matches registration document' });
+  assert.equal(reviewed.status, 200);
+  assert.equal(reviewed.body.data.vehicleVerificationStatus, 'verified');
+  const online = await request(app).post('/api/v1/drivers/status')
+    .set(auth(driverToken)).send({ isOnline: true });
+  assert.equal(online.status, 200);
 });

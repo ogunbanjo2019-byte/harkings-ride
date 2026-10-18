@@ -235,6 +235,7 @@ export const eligibleDrivers = () =>
       d.onlineStatus &&
       d.status === DRIVER_STATUS.ACTIVE &&
       d.verificationStatus === 'approved' &&
+      d.vehicleVerificationStatus === 'verified' &&
       db.subscriptions.some(
         (s) =>
           s.driverId === d.id &&

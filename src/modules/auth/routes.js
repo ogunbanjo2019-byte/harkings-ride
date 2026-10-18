@@ -22,6 +22,7 @@ import { requireAuth } from '../../middleware/auth.js';
 import { validate } from '../../middleware/errors.js';
 import { otpEmail, passwordResetEmail, sendEmail } from '../../services/email.js';
 import { storePrivateFile, validateUpload } from '../../services/storage.js';
+import { isValidVehiclePlate, normalizeVehiclePlate } from '../../services/vehicle-plate.js';
 
 const router = Router();
 const identityUpload = multer({
@@ -138,6 +139,22 @@ const registerSchema = z.object({
   phone: z.string().min(7).max(30),
   password: z.string().min(8).max(128),
   role: z.enum(['rider', 'driver']).default('rider'),
+  vehiclePlateNumber: z.string().trim().min(1).max(20).optional(),
+  vehiclePlate: z.string().trim().min(1).max(20).optional(),
+  plateNumber: z.string().trim().min(1).max(20).optional(),
+  plate: z.string().trim().min(1).max(20).optional(),
+  vehicle_plate_number: z.string().trim().min(1).max(20).optional(),
+  plate_number: z.string().trim().min(1).max(20).optional(),
+}).transform((value) => {
+  const { vehiclePlateNumber, vehiclePlate, plateNumber, plate, vehicle_plate_number, plate_number, ...user } = value;
+  const rawPlate = vehiclePlateNumber || vehiclePlate || plateNumber || plate || vehicle_plate_number || plate_number;
+  return { ...user, vehiclePlateNumber: rawPlate ? normalizeVehiclePlate(rawPlate) : undefined };
+}).superRefine((value, context) => {
+  if (value.role === 'driver' && !value.vehiclePlateNumber) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['vehiclePlateNumber'], message: 'Vehicle plate number is required for driver registration' });
+  } else if (value.role === 'driver' && !isValidVehiclePlate(value.vehiclePlateNumber)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ['vehiclePlateNumber'], message: 'Enter a valid plate in the format ABC-123XY' });
+  }
 });
 
 const loginSchema = z
@@ -227,7 +244,17 @@ router.post(
     delete user.password;
 
     if (user.role === 'driver') {
-      createDriver(user.id);
+      const duplicatePlate = db.drivers.some(
+        (driver) => normalizeVehiclePlate(driver.vehiclePlateNumber) === req.body.vehiclePlateNumber
+      );
+      if (duplicatePlate) {
+        db.users.splice(db.users.indexOf(user), 1);
+        return fail(res, 409, 'This vehicle plate is already registered.', 'VEHICLE_PLATE_IN_USE');
+      }
+      createDriver(user.id, {
+        vehiclePlateNumber: req.body.vehiclePlateNumber,
+        vehicleVerificationStatus: 'pending',
+      });
     } else {
       createRider(user.id);
     }

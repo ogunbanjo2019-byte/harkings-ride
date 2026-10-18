@@ -96,7 +96,7 @@ test('driver face session requires explicit consent and rejects when provider is
       email: 'face-driver@example.com',
       phone: '+234800001222',
       password: 'Password123!',
-      role: 'driver'
+      role: 'driver', vehiclePlateNumber: 'TST-001AA'
     });
 
   assert.equal(registered.status, 201);
@@ -131,7 +131,7 @@ test('face session requires the deployed consent notice revision', async () => {
       email: 'consent-face@example.com',
       phone: '+234800001226',
       password: 'Password123!',
-      role: 'driver'
+      role: 'driver', vehiclePlateNumber: 'TST-002AA'
     });
 
   const previous = env.identityProvider;
@@ -162,7 +162,7 @@ test('a pending face session is never resumed for a different identity document'
       email: 'document-switch@example.com',
       phone: '+234800001227',
       password: 'Password123!',
-      role: 'driver'
+      role: 'driver', vehiclePlateNumber: 'TST-003AA'
     });
 
   const driver = db.drivers.find((item) => item.userId === registered.body.data.user.id);
@@ -227,7 +227,7 @@ test('driver can cancel only their own pending face-verification session', async
       email: 'cancel-face@example.com',
       phone: '+234800001223',
       password: 'Password123!',
-      role: 'driver'
+      role: 'driver', vehiclePlateNumber: 'TST-004AA'
     });
 
   assert.equal(registered.status, 201);
@@ -258,7 +258,7 @@ test('driver can cancel only their own pending face-verification session', async
       email: 'other-face@example.com',
       phone: '+234800001224',
       password: 'Password123!',
-      role: 'driver'
+      role: 'driver', vehiclePlateNumber: 'TST-005AA'
     });
 
   const denied = await request(app)
@@ -279,7 +279,7 @@ test('production refuses a driver-submitted subscription reference without provi
       email: 'subscription-face@example.com',
       phone: '+234800001225',
       password: 'Password123!',
-      role: 'driver'
+      role: 'driver', vehiclePlateNumber: 'TST-006AA'
     });
 
   const previous = env.isProduction;

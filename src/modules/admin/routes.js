@@ -3,15 +3,18 @@ import { z } from 'zod';
 import { validate } from '../../middleware/errors.js';
 import { getPricing, savePricing } from '../../services/pricing.js';
 import { db, findRide, findUser, id, timestamp } from '../../database/store.js';
-import { fail, ok, paginate } from '../../shared/core.js';
+import { asyncHandler, fail, ok, paginate } from '../../shared/core.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { sendEmail } from '../../services/email.js';
 import { submitIdentityCheck, updateIdentityCheck } from '../../services/identity.js';
 import { enqueueJob } from '../../services/jobs.js';
+import { isValidVehiclePlate, normalizeVehiclePlate } from '../../services/vehicle-plate.js';
+import { signedPrivateUrl } from '../../services/storage.js';
 
 const router = Router();
 router.use(requireAuth, requireRole('admin'));
 
+// --- Validation Schemas ---
 
 const pricingSchema = z.object({
   baseFare: z.number().nonnegative(),
@@ -27,6 +30,10 @@ const cngPricingSchema = z.object({
   pricePerUnit: z.number().positive().max(100000),
   currency: z.literal('NGN').default('NGN'),
 });
+const vehicleReviewSchema = z.object({
+  status: z.enum(['verified', 'rejected']),
+  note: z.string().max(500).optional(),
+});
 
 const promotionSchema = z.object({
   code: z.string().min(2).max(40),
@@ -35,6 +42,8 @@ const promotionSchema = z.object({
   active: z.boolean().default(true),
   expiresAt: z.string().datetime().optional(),
 });
+
+// --- Helper Functions ---
 
 const audit = (req, action, resource, resourceId, metadata = {}) => {
   return db.auditLogs.push({
@@ -91,6 +100,7 @@ function reviewDriver(req, res, status) {
   return ok(res, `Driver ${status}`, { driver });
 }
 
+// --- Pricing Routes ---
 
 router.get('/pricing', (req, res) =>
   ok(res, 'Current ride pricing', {
@@ -384,6 +394,63 @@ router.put('/documents/:id/review', (req, res) => {
 
   audit(req, 'review', 'document', document.id, req.body);
   return ok(res, 'Document reviewed', { document: { ...document, contentBase64: undefined } });
+});
+
+router.get('/documents/:id/signed-url', asyncHandler(async (req, res) => {
+  const document = db.documents.find((item) => item.id === req.params.id);
+  if (!document) return fail(res, 404, 'Document not found', 'DOCUMENT_NOT_FOUND');
+  if (!document.storage?.stored || !document.storage.path) {
+    return fail(res, 503, 'This document is not available in private storage.', 'DOCUMENT_STORAGE_UNAVAILABLE');
+  }
+  const url = await signedPrivateUrl(document.storage.path, 300);
+  if (!url) return fail(res, 503, 'Private document storage is not configured.', 'STORAGE_NOT_CONFIGURED');
+  return ok(res, 'Short-lived document URL created', { url, expiresInSeconds: 300 });
+}));
+
+router.get('/vehicle-verification/queue', (req, res) => {
+  const rows = db.drivers
+    .filter((driver) => driver.vehicleVerificationStatus !== 'verified')
+    .map((driver) => ({
+      driver: driverView(driver),
+      registrationDocuments: db.documents
+        .filter((document) => document.driverId === driver.id && document.documentType === 'vehicle_registration')
+        .map(({ contentBase64, ...document }) => document),
+    }));
+  return ok(res, 'Vehicle verification queue', paginate(rows, req.query.page, req.query.limit));
+});
+
+router.put('/drivers/:id/vehicle-review', validate(vehicleReviewSchema), (req, res) => {
+  const driver = db.drivers.find((item) => item.id === req.params.id);
+  if (!driver) return fail(res, 404, 'Driver not found', 'DRIVER_NOT_FOUND');
+  if (!driver.vehiclePlateNumber || !isValidVehiclePlate(driver.vehiclePlateNumber)) {
+    return fail(res, 409, 'Driver must submit a valid vehicle plate before review.', 'VEHICLE_PLATE_REQUIRED');
+  }
+  if (req.body.status === 'verified') {
+    const approvedDocument = db.documents.some(
+      (document) => document.driverId === driver.id && document.documentType === 'vehicle_registration' && document.status === 'approved'
+    );
+    if (!approvedDocument) {
+      return fail(res, 409, 'Approve a vehicle registration document before verifying this plate.', 'VEHICLE_DOCUMENT_NOT_APPROVED');
+    }
+    const duplicate = db.drivers.some(
+      (other) => other.id !== driver.id && other.vehicleVerificationStatus === 'verified' && normalizeVehiclePlate(other.vehiclePlateNumber) === normalizeVehiclePlate(driver.vehiclePlateNumber)
+    );
+    if (duplicate) return fail(res, 409, 'This plate is already verified on another driver account.', 'VEHICLE_PLATE_IN_USE');
+  }
+  driver.vehicleVerificationStatus = req.body.status;
+  driver.vehicleVerifiedAt = req.body.status === 'verified' ? timestamp() : null;
+  driver.vehicleReviewedBy = req.user.id;
+  driver.vehicleReviewNote = req.body.note || null;
+  driver.vehicleReviewedAt = timestamp();
+  if (req.body.status === 'rejected') driver.onlineStatus = false;
+  audit(req, req.body.status, 'driver_vehicle', driver.id, {
+    plateNumber: driver.vehiclePlateNumber,
+    note: req.body.note || null,
+  });
+  return ok(res, 'Vehicle review saved', {
+    driver: driverView(driver),
+    vehicleVerificationStatus: driver.vehicleVerificationStatus,
+  });
 });
 
 router.post('/identity/checks', (req, res) => {

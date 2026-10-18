@@ -89,7 +89,7 @@ test('Paystack webhook rejects invalid signatures', async () => {
 });
 
 test('document upload stores metadata without base64 payload', async () => {
-  const registered = await request(app).post('/api/v1/auth/register').send({ name: 'Driver User', email: 'driver-upload@example.com', phone: '+234800000112', password: 'Password123!', role: 'driver' });
+  const registered = await request(app).post('/api/v1/auth/register').send({ name: 'Driver User', email: 'driver-upload@example.com', phone: '+234800000112', password: 'Password123!', role: 'driver', vehiclePlateNumber: 'TST-001AA' });
   const response = await request(app).post('/api/v1/drivers/verification/document').set('Authorization', `Bearer ${registered.body.data.accessToken}`).field('documentType', 'license').attach('document', Buffer.from('fake-image'), { filename: 'license.jpg', contentType: 'image/jpeg' });
   assert.equal(response.status, 202);
   assert.equal(Object.hasOwn(db.documents[0], 'contentBase64'), false);
