@@ -246,7 +246,9 @@ router.get('/trips', (req, res) => {
   const driver = requireDriver(req, res);
   if (!driver) return;
 
-  const rides = db.rides.filter((r) => r.driverId === driver.id);
+  const rides = db.rides
+    .filter((r) => r.driverId === driver.id)
+    .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0));
 
   return ok(res, 'Driver trips', paginate(rides, req.query.page, req.query.limit));
 });

@@ -254,7 +254,10 @@ router.get('/', requireRole('rider', 'driver', 'admin'), (req, res) => {
     });
   }
 
-  const visibleRides = rides.map((ride) => rideForViewer(ride, req.user));
+  const visibleRides = rides
+    .slice()
+    .sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0))
+    .map((ride) => rideForViewer(ride, req.user));
   return ok(res, 'Rides', paginate(visibleRides, req.query.page, req.query.limit));
 });
 

@@ -117,7 +117,7 @@ function reviewDriver(req, res, status) {
   driver.reviewNote = req.body.note || null;
   notifyUser(driver.userId, {
     title: status === 'approved' ? 'Driver application approved' : 'Driver application rejected',
-    body: status === 'approved' ? 'Your driver account has been approved.' : 'Your driver application was rejected.',
+    body: status === 'approved' ? 'Your driver account has been approved.' : (driver.reviewNote || 'Your driver application was rejected.'),
     kind: status === 'approved' ? 'driver_approved' : 'driver_rejected',
     data: { driverId: driver.id, note: driver.reviewNote },
   });
@@ -422,6 +422,27 @@ router.get('/verification/queue', (req, res) => {
   return ok(res, 'Driver verification queue', paginate(rows, req.query.page, req.query.limit));
 });
 
+router.put('/drivers/:id/nin-review', (req, res) => {
+  const driver = db.drivers.find((item) => item.id === req.params.id);
+  if (!driver) return fail(res, 404, 'Driver not found', 'DRIVER_NOT_FOUND');
+  const status = ['verified', 'rejected', 'pending'].includes(req.body.status) ? req.body.status : null;
+  if (!status) return fail(res, 400, 'Status must be verified, rejected, or pending', 'INVALID_STATUS');
+  driver.verification ||= {};
+  driver.verification.nin = {
+    ...(driver.verification.nin || {}),
+    status,
+    reviewedAt: timestamp(),
+    reviewedBy: req.user.id,
+    reviewNote: req.body.note || null,
+  };
+  audit(req, 'review', 'driver_nin', driver.id, { status, note: req.body.note || null });
+  notifyUser(driver.userId, {
+    title: status === 'verified' ? 'NIN verified' : status === 'rejected' ? 'NIN verification rejected' : 'NIN review updated',
+    body: req.body.note || (status === 'verified' ? 'Your NIN has been verified.' : status === 'rejected' ? 'Your NIN could not be verified. Please resubmit.' : 'Your NIN is still under review.'),
+    kind: `nin_${status}`, data: { driverId: driver.id, note: req.body.note || null },
+  });
+  return ok(res, 'NIN review saved', { verification: { nin: driver.verification.nin } });
+});
 router.put('/drivers/:id/verification-review', (req, res) => {
   const driver = db.drivers.find((item) => item.id === req.params.id);
   if (!driver) return fail(res, 404, 'Driver not found', 'DRIVER_NOT_FOUND');
@@ -571,7 +592,8 @@ router.put('/identity/checks/:id', (req, res) => {
 });
 
 router.get('/rides', (req, res) => {
-  return ok(res, 'Rides', paginate(db.rides, req.query.page, req.query.limit));
+  const newestFirst = [...db.rides].sort((a, b) => Date.parse(b.createdAt || 0) - Date.parse(a.createdAt || 0));
+  return ok(res, 'Rides', paginate(newestFirst, req.query.page, req.query.limit));
 });
 
 router.get('/rides/:id', (req, res) => {
