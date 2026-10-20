@@ -36,6 +36,24 @@ const vehicleReviewSchema = z.object({
   status: z.enum(['verified', 'rejected']),
   note: z.string().max(500).optional(),
 });
+const driverVerificationReviewSchema = z.object({
+  status: z.enum(['approved', 'rejected', 'pending']),
+  note: z.string().trim().max(500).optional(),
+  reviewDocuments: z.boolean().optional(),
+}).superRefine((value, ctx) => {
+  if (value.status === 'rejected' && (!value.note || value.note.length < 3)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['note'], message: 'A rejection reason of at least 3 characters is required.' });
+  }
+});
+const driverRejectSchema = z.object({ note: z.string().trim().min(3).max(500) });
+const ninReviewSchema = z.object({
+  status: z.enum(['verified', 'rejected', 'pending']),
+  note: z.string().trim().max(500).optional(),
+}).superRefine((value, ctx) => {
+  if (['verified', 'rejected'].includes(value.status) && (!value.note || value.note.length < 3)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['note'], message: 'Record the authorized verification reference or rejection reason.' });
+  }
+});
 
 const promotionSchema = z.object({
   code: z.string().min(2).max(40),
@@ -61,7 +79,7 @@ const audit = (req, action, resource, resourceId, metadata = {}) => {
 
 const safeUser = (user) => {
   if (!user) return null;
-  const { passwordHash, tokenVersion, adminMfaSecret, adminMfaPending, ...publicRecord } = user;
+  const { passwordHash, tokenVersion, adminMfaSecret, adminMfaPendingSecret, adminMfaPendingExpiresAt, adminMfaLastCounter, ...publicRecord } = user;
   return publicRecord;
 };
 
@@ -122,7 +140,7 @@ function reviewDriver(req, res, status) {
     data: { driverId: driver.id, note: driver.reviewNote },
   });
 
-  audit(req, status, 'driver', driver.id);
+  audit(req, status, 'driver', driver.id, { note: driver.reviewNote });
   return ok(res, `Driver ${status}`, { driver });
 }
 
@@ -385,7 +403,7 @@ router.put('/support/tickets/:id/close', (req, res) => {
 });
 
 router.put('/drivers/:id/approve', (req, res) => reviewDriver(req, res, 'approved'));
-router.put('/drivers/:id/reject', (req, res) => reviewDriver(req, res, 'rejected'));
+router.put('/drivers/:id/reject', validate(driverRejectSchema), (req, res) => reviewDriver(req, res, 'rejected'));
 
 router.put('/drivers/:id/suspend', (req, res) => {
   const driver = db.drivers.find((d) => d.id === req.params.id);
@@ -409,6 +427,7 @@ router.get('/verification/queue', (req, res) => {
     .filter(
       (driver) =>
         driver.verificationStatus !== 'approved' ||
+        (driver.verification?.nin?.submittedAt && driver.verification.nin.status !== 'verified') ||
         db.documents.some((doc) => doc.driverId === driver.id && doc.status === 'pending')
     )
     .map((driver) => ({
@@ -422,11 +441,12 @@ router.get('/verification/queue', (req, res) => {
   return ok(res, 'Driver verification queue', paginate(rows, req.query.page, req.query.limit));
 });
 
-router.put('/drivers/:id/nin-review', (req, res) => {
+router.put('/drivers/:id/nin-review', validate(ninReviewSchema), (req, res) => {
   const driver = db.drivers.find((item) => item.id === req.params.id);
   if (!driver) return fail(res, 404, 'Driver not found', 'DRIVER_NOT_FOUND');
   const status = ['verified', 'rejected', 'pending'].includes(req.body.status) ? req.body.status : null;
   if (!status) return fail(res, 400, 'Status must be verified, rejected, or pending', 'INVALID_STATUS');
+  if (!driver.verification?.nin?.submittedAt) return fail(res, 409, 'The driver must submit a NIN before it can be reviewed.', 'NIN_NOT_SUBMITTED');
   driver.verification ||= {};
   driver.verification.nin = {
     ...(driver.verification.nin || {}),
@@ -443,7 +463,7 @@ router.put('/drivers/:id/nin-review', (req, res) => {
   });
   return ok(res, 'NIN review saved', { verification: { nin: driver.verification.nin } });
 });
-router.put('/drivers/:id/verification-review', (req, res) => {
+router.put('/drivers/:id/verification-review', validate(driverVerificationReviewSchema), (req, res) => {
   const driver = db.drivers.find((item) => item.id === req.params.id);
   if (!driver) return fail(res, 404, 'Driver not found', 'DRIVER_NOT_FOUND');
 
@@ -459,7 +479,7 @@ router.put('/drivers/:id/verification-review', (req, res) => {
   driver.reviewNote = req.body.note || null;
   notifyUser(driver.userId, {
     title: status === 'approved' ? 'Driver application approved' : status === 'rejected' ? 'Driver application rejected' : 'Driver review updated',
-    body: status === 'approved' ? 'Your driver account has been approved.' : status === 'rejected' ? 'Your driver application was rejected.' : 'Your driver verification is still under review.',
+    body: status === 'approved' ? 'Your driver account has been approved.' : status === 'rejected' ? (req.body.note || 'Your driver application was rejected.') : 'Your driver verification is still under review.',
     kind: `driver_${status}`, data: { driverId: driver.id, note: req.body.note || null },
   });
 

@@ -149,3 +149,27 @@ test('admin MFA enrollment enables TOTP-protected short-lived admin access witho
     env.emailVerificationRequired = previousEmailVerification;
   }
 });
+
+test('NIN can be marked verified only after submission with an audit reference, and driver rejections retain reasons', async () => {
+  const admin = { id: 'review-admin-test', email: 'review-admin@example.com', role: 'admin', status: 'active' };
+  const driverUser = { id: 'review-driver-user', email: 'review-driver@example.com', role: 'driver', status: 'active' };
+  const driver = { id: 'review-driver-test', userId: driverUser.id, verificationStatus: 'pending', verification: { nin: { status: 'pending' } } };
+  db.users.push(admin, driverUser);
+  db.drivers.push(driver);
+  const token = jwt.sign({ sub: admin.id, role: 'admin' }, env.jwtSecret);
+  const base = request(app).put(`/api/v1/admin/drivers/${driver.id}/nin-review`).set('Authorization', `Bearer ${token}`);
+  const premature = await base.send({ status: 'verified', note: 'checked in approved source' });
+  assert.equal(premature.status, 409);
+  driver.verification.nin.submittedAt = new Date().toISOString();
+  const approved = await request(app).put(`/api/v1/admin/drivers/${driver.id}/nin-review`).set('Authorization', `Bearer ${token}`).send({ status: 'verified', note: 'provider reference CASE-123' });
+  assert.equal(approved.status, 200);
+  assert.equal(driver.verification.nin.status, 'verified');
+  assert.match(JSON.stringify(db.auditLogs), /CASE-123/);
+
+  const missingReason = await request(app).put(`/api/v1/admin/drivers/${driver.id}/reject`).set('Authorization', `Bearer ${token}`).send({});
+  assert.equal(missingReason.status, 400);
+  const rejected = await request(app).put(`/api/v1/admin/drivers/${driver.id}/reject`).set('Authorization', `Bearer ${token}`).send({ note: 'Identity documents do not match the profile.' });
+  assert.equal(rejected.status, 200);
+  assert.equal(driver.reviewNote, 'Identity documents do not match the profile.');
+  assert.ok(db.notifications.some((item) => item.userId === driverUser.id && item.body === driver.reviewNote));
+});
