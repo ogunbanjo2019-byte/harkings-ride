@@ -381,13 +381,19 @@
       </div>
       <div class="field">
         <label for="password">Password</label>
-        <input id="password" type="password" required>
+        <input id="password" type="password" autocomplete="current-password" required>
+      </div>
+      <div class="field">
+        <label for="mfaCode">Authenticator code (if already enrolled)</label>
+        <input id="mfaCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="6-digit code">
       </div>
       <button class="primary" type="submit">Sign in</button>
       <div class="error" id="loginError"></div>
     </form>
   </section>
 
+  <section id="emailVerify" class="hidden" style="min-height:100vh;display:grid;place-items:center;background:linear-gradient(135deg,#071a2b,#0c4259);padding:18px"><div class="login-card"><h1>Verify admin email</h1><p>Verify the admin email using the one-time code sent to your inbox before setting up MFA.</p><button id="sendAdminEmailCode" class="primary" type="button">Send verification code</button><form id="verifyAdminEmailForm"><div class="field"><label for="adminEmailCode">Email code</label><input id="adminEmailCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></div><button class="primary" type="submit">Verify email</button></form><div class="error" id="emailVerifyError"></div><button id="emailVerifyLogout" class="logout" type="button">Cancel / sign out</button></div></section>
+  <section id="mfaSetup" class="hidden" style="min-height:100vh;display:grid;place-items:center;background:linear-gradient(135deg,#071a2b,#0c4259);padding:18px"><div class="login-card"><h1>Secure your admin account</h1><p>Enter this secret into an authenticator app, then confirm using the current 6-digit code. Keep the secret private.</p><button id="beginMfa" class="primary" type="button">Set up authenticator</button><div id="mfaDetails" class="hidden"><p><strong>Manual secret</strong><br><code id="mfaSecret" style="overflow-wrap:anywhere"></code></p><p><strong>Authenticator setup URI</strong><br><code id="mfaUri" style="overflow-wrap:anywhere"></code></p><form id="mfaConfirmForm"><div class="field"><label for="mfaConfirmCode">6-digit code</label><input id="mfaConfirmCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required></div><button class="primary" type="submit">Enable MFA and continue</button></form></div><div class="error" id="mfaError"></div><button id="mfaLogout" class="logout" type="button">Cancel / sign out</button></div></section>
   <section id="app" class="shell hidden">
     <aside class="sidebar">
       <div class="brand"><span class="brand-mark">S</span> SWITCHRIDE</div>
@@ -419,7 +425,7 @@
 
   <script>
     const API = '/api/v1';
-    let token = localStorage.getItem('adminToken');
+    let token = sessionStorage.getItem('adminToken');
     const $ = id => document.getElementById(id);
 
     const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({
@@ -462,12 +468,22 @@
     function showApp() {
       $('login').classList.add('hidden');
       $('app').classList.remove('hidden');
+      $('mfaSetup').classList.add('hidden');
+      $('emailVerify').classList.add('hidden');
       loadView('overview');
     }
 
     function showLogin() {
       $('app').classList.add('hidden');
       $('login').classList.remove('hidden');
+      $('mfaSetup').classList.add('hidden');
+      $('emailVerify').classList.add('hidden');
+    }
+    function showEmailVerify() { $('login').classList.add('hidden'); $('app').classList.add('hidden'); $('mfaSetup').classList.add('hidden'); $('emailVerify').classList.remove('hidden'); }
+    function showMfaSetup() {
+      $('login').classList.add('hidden');
+      $('app').classList.add('hidden');
+      $('mfaSetup').classList.remove('hidden');
     }
 
     $('loginForm').onsubmit = async e => {
@@ -476,11 +492,17 @@
       try {
         const d = await api('/auth/login', {
           method: 'POST',
-          body: JSON.stringify({ email: $('email').value, password: $('password').value })
+          body: JSON.stringify({ email: $('email').value, password: $('password').value, mfaCode: $('mfaCode').value || undefined })
         });
         if (d.user.role !== 'admin') throw Error('This account is not an admin');
         token = d.accessToken;
-        localStorage.setItem('adminToken', token);
+        sessionStorage.setItem('adminToken', token);
+        if (d.requiresEmailVerification) { showEmailVerify(); return; }
+        if (!d.user.adminMfaEnabled) {
+          showMfaSetup();
+          $('mfaError').textContent = 'MFA enrollment is required before dashboard access.';
+          return;
+        }
         showApp();
       } catch (err) {
         $('loginError').textContent = err.message;
@@ -488,11 +510,43 @@
     };
 
     $('logout').onclick = () => {
-      localStorage.removeItem('adminToken');
+      sessionStorage.removeItem('adminToken');
       token = null;
       showLogin();
     };
 
+    $('sendAdminEmailCode').onclick = async () => {
+      $('emailVerifyError').textContent = '';
+      try { await api('/auth/send-otp', { method: 'POST', body: JSON.stringify({ email: $('email').value, purpose: 'verification' }) }); $('emailVerifyError').textContent = 'If the address is valid, a code has been sent.'; }
+      catch (err) { $('emailVerifyError').textContent = err.message; }
+    };
+    $('verifyAdminEmailForm').onsubmit = async e => {
+      e.preventDefault(); $('emailVerifyError').textContent = '';
+      try { await api('/auth/verify-otp', { method: 'POST', body: JSON.stringify({ email: $('email').value, purpose: 'verification', code: $('adminEmailCode').value }) }); showMfaSetup(); $('mfaError').textContent = 'Email verified. Enroll an authenticator to continue.'; }
+      catch (err) { $('emailVerifyError').textContent = err.message; }
+    };
+    $('emailVerifyLogout').onclick = () => { sessionStorage.removeItem('adminToken'); token = null; showLogin(); };
+    $('beginMfa').onclick = async () => {
+      $('mfaError').textContent = '';
+      try {
+        const d = await api('/auth/admin-mfa/enroll', { method: 'POST', body: JSON.stringify({ password: $('password').value }) });
+        $('mfaSecret').textContent = d.secret;
+        $('mfaUri').textContent = d.otpauthUrl;
+        $('mfaDetails').classList.remove('hidden');
+        $('beginMfa').classList.add('hidden');
+      } catch (err) { $('mfaError').textContent = err.message; }
+    };
+    $('mfaConfirmForm').onsubmit = async e => {
+      e.preventDefault();
+      $('mfaError').textContent = '';
+      try {
+        const d = await api('/auth/admin-mfa/confirm', { method: 'POST', body: JSON.stringify({ code: $('mfaConfirmCode').value }) });
+        token = d.accessToken;
+        sessionStorage.setItem('adminToken', token);
+        showApp();
+      } catch (err) { $('mfaError').textContent = err.message; }
+    };
+    $('mfaLogout').onclick = () => { sessionStorage.removeItem('adminToken'); token = null; showLogin(); };
     document.querySelectorAll('.nav button').forEach(b => {
       b.onclick = () => {
         document.querySelectorAll('.nav button').forEach(x => x.classList.remove('active'));
@@ -663,7 +717,12 @@
       }
     }
 
-    if (token) showApp();
+    if (token) {
+      api('/auth/admin-mfa/status').then(status => {
+        if (status.required && !status.enabled) showMfaSetup();
+        else showApp();
+      }).catch(() => { sessionStorage.removeItem('adminToken'); token = null; showLogin(); });
+    }
   </script>
 </body>
 </html>

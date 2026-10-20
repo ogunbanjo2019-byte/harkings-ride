@@ -159,7 +159,7 @@ export const findUser = ({ id: userId, email, phone } = {}) =>
       (phone && u.phone === phone)
   );
 
-export const publicUser = ({ passwordHash, ...user }) => user;
+export const publicUser = ({ passwordHash, tokenVersion, adminMfaSecret, adminMfaPendingSecret, adminMfaPendingExpiresAt, adminMfaLastCounter, ...user }) => user;
 
 export const createUser = ({ name, email, phone, phoneVerifiedAt, passwordHash, role = ROLES.RIDER }) => {
   const user = {

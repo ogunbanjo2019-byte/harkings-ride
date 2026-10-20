@@ -20,6 +20,7 @@ import {
 import { asyncHandler, fail, ok } from '../../shared/core.js';
 import { requireAuth } from '../../middleware/auth.js';
 import { validate } from '../../middleware/errors.js';
+import { encryptTotpSecret, decryptTotpSecret, generateTotpSecret, totpCounterForCode, totpUri } from '../../services/admin-mfa.js';
 import { otpEmail, passwordResetEmail, sendEmail } from '../../services/email.js';
 import { storePrivateFile, validateUpload } from '../../services/storage.js';
 import { isValidVehiclePlate, normalizeVehiclePlate } from '../../services/vehicle-plate.js';
@@ -40,11 +41,12 @@ const normalizePhone = (value = '') => {
   return cleaned;
 };
 
-const issue = (user) => ({
-  accessToken: jwt.sign({ sub: user.id, role: user.role }, env.jwtSecret, {
-    expiresIn: env.jwtExpiresIn,
+const issue = (user, { adminMfa = false } = {}) => ({
+  accessToken: jwt.sign({ sub: user.id, role: user.role, ver: Number(user.tokenVersion || 0), ...(adminMfa ? { mfa: true } : {}) }, env.jwtSecret, {
+    expiresIn: user.role === 'admin' && env.adminMfaRequired ? '15m' : env.jwtExpiresIn,
   }),
   user: publicUser(user),
+  requiresEmailVerification: Boolean(env.emailVerificationRequired && user.email && !user.emailVerifiedAt),
 });
 
 const refreshTokenFor = (user) =>
@@ -162,6 +164,7 @@ const loginSchema = z
     email: z.string().email().optional(),
     phone: z.string().max(30).optional(),
     password: z.string().min(1).max(128),
+    mfaCode: z.string().regex(/^\d{6}$/).optional(),
   })
   .refine((value) => value.email || value.phone, 'Email or phone is required');
 
@@ -221,6 +224,12 @@ const resetPasswordSchema = z.object({
   token: z.string().min(20).max(200),
   password: z.string().min(8).max(128),
 });
+const adminMfaSetupSchema = z.object({ password: z.string().min(1).max(128) });
+const adminMfaCodeSchema = z.object({ code: z.string().regex(/^\d{6}$/) });
+const adminMfaAttemptLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, limit: 5, standardHeaders: 'draft-7', legacyHeaders: false,
+  message: { success: false, message: 'Too many authenticator attempts. Wait 15 minutes and try again.', error: { code: 'ADMIN_MFA_RATE_LIMITED' } },
+});
 
 router.post(
   '/register',
@@ -263,8 +272,13 @@ router.post(
   })
 );
 
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-7', legacyHeaders: false,
+  message: { success: false, message: 'Too many sign-in attempts. Wait 15 minutes and try again.', error: { code: 'LOGIN_RATE_LIMITED' } },
+});
 router.post(
   '/login',
+  adminLoginLimiter,
   validate(loginSchema),
   asyncHandler(async (req, res) => {
     const email = req.body.email?.trim().toLowerCase();
@@ -279,10 +293,53 @@ router.post(
       return fail(res, 401, 'Invalid credentials', 'INVALID_CREDENTIALS');
     }
 
+    if (user.role === 'admin' && env.adminMfaRequired && user.adminMfaEnabled) {
+      if (!req.body.mfaCode || !user.adminMfaSecret) {
+        return fail(res, 401, 'Enter the 6-digit code from your authenticator app.', 'ADMIN_MFA_REQUIRED');
+      }
+      let counter;
+      try { counter = totpCounterForCode(decryptTotpSecret(user.adminMfaSecret), req.body.mfaCode); } catch { counter = null; }
+      if (counter === null || counter <= Number(user.adminMfaLastCounter ?? -1)) {
+        return fail(res, 401, 'Invalid or already-used authenticator code.', 'ADMIN_MFA_INVALID');
+      }
+      user.adminMfaLastCounter = counter;
+      return ok(res, 'Login successful', issue(user, { adminMfa: true }));
+    }
     return ok(res, 'Login successful', issue(user));
   })
 );
 
+router.post('/admin-mfa/enroll', requireAuth, validate(adminMfaSetupSchema), asyncHandler(async (req, res) => {
+  const user = findUser({ id: req.user.id });
+  if (!user || user.role !== 'admin') return fail(res, 403, 'Admin account required.', 'FORBIDDEN');
+  if (!env.adminMfaRequired) return fail(res, 409, 'Admin MFA is not required on this deployment.', 'ADMIN_MFA_DISABLED');
+  if (user.adminMfaEnabled) return fail(res, 409, 'MFA is already enabled. Contact an administrator to reset it.', 'ADMIN_MFA_ALREADY_ENABLED');
+  if (!(await bcrypt.compare(req.body.password, user.passwordHash))) return fail(res, 401, 'Password confirmation failed.', 'INVALID_CREDENTIALS');
+  const secret = generateTotpSecret();
+  user.adminMfaPendingSecret = encryptTotpSecret(secret);
+  user.adminMfaPendingExpiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  return ok(res, 'Scan this authenticator setup and confirm with a current code.', { secret, otpauthUrl: totpUri(secret, user.email), expiresInSeconds: 600 });
+}));
+router.post('/admin-mfa/confirm', adminMfaAttemptLimiter, requireAuth, validate(adminMfaCodeSchema), (req, res) => {
+  const user = findUser({ id: req.user.id });
+  if (!user || user.role !== 'admin') return fail(res, 403, 'Admin account required.', 'FORBIDDEN');
+  if (user.adminMfaEnabled) return fail(res, 409, 'MFA is already enabled.', 'ADMIN_MFA_ALREADY_ENABLED');
+  if (!user.adminMfaPendingSecret || Date.parse(user.adminMfaPendingExpiresAt || '') < Date.now()) return fail(res, 409, 'MFA setup expired. Start enrollment again.', 'ADMIN_MFA_SETUP_EXPIRED');
+  let counter;
+  try { counter = totpCounterForCode(decryptTotpSecret(user.adminMfaPendingSecret), req.body.code); } catch { counter = null; }
+  if (counter === null) return fail(res, 401, 'That authenticator code is invalid. Try the current 6-digit code.', 'ADMIN_MFA_INVALID');
+  user.adminMfaSecret = user.adminMfaPendingSecret;
+  user.adminMfaEnabled = true;
+  user.adminMfaLastCounter = counter;
+  delete user.adminMfaPendingSecret;
+  delete user.adminMfaPendingExpiresAt;
+  return ok(res, 'Admin MFA enabled', issue(user, { adminMfa: true }));
+});
+router.get('/admin-mfa/status', requireAuth, (req, res) => {
+  const user = findUser({ id: req.user.id });
+  if (user?.role !== 'admin') return fail(res, 403, 'Admin account required.', 'FORBIDDEN');
+  return ok(res, 'Admin MFA status', { required: env.adminMfaRequired, enabled: Boolean(user.adminMfaEnabled) });
+});
 router.post(
   '/identity/nin',
   requireAuth,
@@ -531,6 +588,10 @@ router.post('/verify-otp', validate(verifyOtpSchema), (req, res) => {
     }
   }
 
+  if (challenge.channel === 'email' && challenge.purpose === 'verification') {
+    const user = findUser({ email: challenge.destination });
+    if (user) user.emailVerifiedAt = timestamp();
+  }
   return ok(res, 'OTP verified', {
     verified: true,
     challengeId: challenge.id,

@@ -57,16 +57,18 @@ const totpAt = (secret, counter) => {
 export const generateTotpCode = (secret, now = Date.now()) =>
   totpAt(secret, Math.floor(now / 30_000));
 
-export const verifyTotp = (secret, suppliedCode, now = Date.now()) => {
-  if (!/^\d{6}$/.test(String(suppliedCode || ''))) return false;
+export const totpCounterForCode = (secret, suppliedCode, now = Date.now()) => {
+  if (!/^\d{6}$/.test(String(suppliedCode || ''))) return null;
   const currentCounter = Math.floor(now / 30_000);
   const supplied = Buffer.from(String(suppliedCode));
   for (const delta of [-1, 0, 1]) {
-    const expected = Buffer.from(totpAt(secret, currentCounter + delta));
-    if (supplied.length === expected.length && timingSafeEqual(supplied, expected)) return true;
+    const counter = currentCounter + delta;
+    const expected = Buffer.from(totpAt(secret, counter));
+    if (supplied.length === expected.length && timingSafeEqual(supplied, expected)) return counter;
   }
-  return false;
+  return null;
 };
+export const verifyTotp = (secret, suppliedCode, now = Date.now()) => totpCounterForCode(secret, suppliedCode, now) !== null;
 
 export const totpUri = (secret, email) => {
   const label = encodeURIComponent(`SwitchRide:${email || 'admin'}`);

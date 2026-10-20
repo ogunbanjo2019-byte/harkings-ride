@@ -73,6 +73,7 @@ app.use(createPersistenceMiddleware(persistToDatabase));
 
 app.use(
   '/api/v1/auth',
+  (_req, res, next) => { res.set('Cache-Control', 'no-store'); res.set('Pragma', 'no-cache'); next(); },
   rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 100,

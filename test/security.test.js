@@ -94,3 +94,58 @@ test('document upload stores metadata without base64 payload', async () => {
   assert.equal(response.status, 202);
   assert.equal(Object.hasOwn(db.documents[0], 'contentBase64'), false);
 });
+
+test('admin MFA enrollment enables TOTP-protected short-lived admin access without exposing secrets', async () => {
+  const bcrypt = (await import('bcryptjs')).default;
+  const { publicUser } = await import('../src/database/store.js');
+  const { generateTotpCode } = await import('../src/services/admin-mfa.js');
+  const previousRequired = env.adminMfaRequired;
+  const previousEmailVerification = env.emailVerificationRequired;
+  env.adminMfaRequired = true;
+  env.emailVerificationRequired = true;
+  try {
+    const admin = {
+      id: 'mfa-admin-test', email: 'mfa-admin@example.com', phone: '+234800000771',
+      name: 'MFA Admin', role: 'admin', status: 'active', tokenVersion: 0,
+      passwordHash: await bcrypt.hash('VerySecurePassword123!', 4),
+    };
+    db.users.push(admin);
+    const signedIn = await request(app).post('/api/v1/auth/login').send({
+      email: admin.email, password: 'VerySecurePassword123!',
+    });
+    assert.equal(signedIn.status, 200);
+    assert.equal(signedIn.body.data.requiresEmailVerification, true);
+    assert.equal(signedIn.body.data.user.adminMfaEnabled, undefined);
+    assert.equal(JSON.stringify(signedIn.body).includes('passwordHash'), false);
+    let token = signedIn.body.data.accessToken;
+    assert.equal((await request(app).get('/api/v1/admin/pricing').set('Authorization', `Bearer ${token}`)).status, 403);
+    const emailed = await request(app).post('/api/v1/auth/send-otp').send({ email: admin.email, purpose: 'verification' });
+    assert.equal(emailed.status, 202);
+    const verified = await request(app).post('/api/v1/auth/verify-otp').send({ email: admin.email, purpose: 'verification', code: emailed.body.data.developmentOtp });
+    assert.equal(verified.status, 200);
+    assert.ok(admin.emailVerifiedAt);
+
+    const setup = await request(app).post('/api/v1/auth/admin-mfa/enroll')
+      .set('Authorization', `Bearer ${token}`).send({ password: 'VerySecurePassword123!' });
+    assert.equal(setup.status, 200);
+    const code = generateTotpCode(setup.body.data.secret);
+    const confirmed = await request(app).post('/api/v1/auth/admin-mfa/confirm')
+      .set('Authorization', `Bearer ${token}`).send({ code });
+    assert.equal(confirmed.status, 200);
+    token = confirmed.body.data.accessToken;
+    assert.equal(admin.adminMfaEnabled, true);
+    assert.equal((await request(app).get('/api/v1/admin/pricing').set('Authorization', `Bearer ${token}`)).status, 200);
+    const safe = publicUser(admin);
+    for (const key of ['passwordHash', 'adminMfaSecret', 'adminMfaPendingSecret', 'adminMfaLastCounter', 'tokenVersion']) {
+      assert.equal(Object.hasOwn(safe, key), false);
+    }
+    const noMfa = await request(app).post('/api/v1/auth/login').send({
+      email: admin.email, password: 'VerySecurePassword123!',
+    });
+    assert.equal(noMfa.status, 401);
+    assert.equal(noMfa.body.error.code, 'ADMIN_MFA_REQUIRED');
+  } finally {
+    env.adminMfaRequired = previousRequired;
+    env.emailVerificationRequired = previousEmailVerification;
+  }
+});
