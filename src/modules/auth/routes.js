@@ -40,6 +40,7 @@ const normalizePhone = (value = '') => {
   if (/^234\d{10}$/.test(cleaned)) return `+${cleaned}`;
   return cleaned;
 };
+const phoneFormat = /^(?:\+[1-9]\d{7,14}|0\d{10})$/;
 
 const issue = (user, { adminMfa = false } = {}) => ({
   accessToken: jwt.sign({ sub: user.id, role: user.role, ver: Number(user.tokenVersion || 0), ...(adminMfa ? { mfa: true } : {}) }, env.jwtSecret, {
@@ -138,7 +139,7 @@ const resetLimiter = rateLimit({
 const registerSchema = z.object({
   name: z.string().min(2).max(120),
   email: z.string().email().optional(),
-  phone: z.string().min(7).max(30),
+  phone: z.string().trim().regex(phoneFormat, 'Use an international number in E.164 format, or an 11-digit Nigerian local number'),
   password: z.string().min(8).max(128),
   role: z.enum(['rider', 'driver']).default('rider'),
   vehiclePlateNumber: z.string().trim().min(1).max(20).optional(),
@@ -162,7 +163,7 @@ const registerSchema = z.object({
 const loginSchema = z
   .object({
     email: z.string().email().optional(),
-    phone: z.string().max(30).optional(),
+    phone: z.string().trim().regex(phoneFormat, 'Use an international number in E.164 format, or an 11-digit Nigerian local number').optional(),
     password: z.string().min(1).max(128),
     mfaCode: z.string().regex(/^\d{6}$/).optional(),
   })
@@ -185,7 +186,7 @@ const verifyOtpSchema = z
   .object({
     challengeId: z.string().uuid().optional(),
     email: z.string().email().optional(),
-    phone: z.string().min(7).optional(),
+    phone: z.string().trim().regex(phoneFormat, 'Use an international number in E.164 format, or an 11-digit Nigerian local number').optional(),
     purpose: z
       .enum(['login', 'signup', 'verification', 'password_reset'])
       .default('login'),
@@ -427,6 +428,7 @@ router.post(
     const { channel, destination } = otpDestination(req.body);
 
     if (
+      !env.stagingMockOtpEnabled &&
       channel === 'phone' &&
       (env.smsProvider !== 'twilio' ||
         !env.twilioAccountSid ||
@@ -454,7 +456,9 @@ router.post(
         challenge.usedAt = now;
       });
 
-    const code = String(randomInt(0, 1000000)).padStart(6, '0');
+    const code = env.stagingMockOtpEnabled
+      ? env.stagingMockOtpCode
+      : String(randomInt(0, 1000000)).padStart(6, '0');
     const challenge = {
       id: id(),
       channel,
@@ -471,7 +475,9 @@ router.post(
     db.otpChallenges.push(challenge);
 
     let deliveryStatus;
-    if (channel === 'email') {
+    if (env.stagingMockOtpEnabled) {
+      deliveryStatus = 'staging_mock';
+    } else if (channel === 'email') {
       const emailResult = await sendEmail({
         to: destination,
         ...otpEmail({ code, purpose: req.body.purpose }),

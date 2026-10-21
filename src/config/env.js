@@ -1,5 +1,13 @@
 if (process.env.NODE_ENV !== 'test') await import('dotenv/config')
 const isProduction = process.env.NODE_ENV === 'production';
+const stagingMockOtpEnabled = process.env.STAGING_MOCK_OTP_ENABLED === 'true';
+const stagingMockOtpCode = process.env.STAGING_MOCK_OTP_CODE || '123456';
+if (stagingMockOtpEnabled && process.env.NODE_ENV !== 'staging') {
+  throw new Error('STAGING_MOCK_OTP_ENABLED may only be enabled when NODE_ENV=staging.');
+}
+if (stagingMockOtpEnabled && !/^\d{6}$/.test(stagingMockOtpCode)) {
+  throw new Error('STAGING_MOCK_OTP_CODE must contain exactly 6 digits.');
+}
 const emailVerificationRequired = process.env.EMAIL_VERIFICATION_REQUIRED === 'true';
 const adminMfaRequired = process.env.ADMIN_MFA_REQUIRED === 'true' ||
   (isProduction && process.env.ADMIN_MFA_REQUIRED !== 'false');
@@ -18,6 +26,9 @@ if (isProduction && configuredJwtSecret.length < 32) {
 const corsOrigins = (process.env.CORS_ORIGINS || process.env.CORS_ORIGIN ||
   (isProduction ? '' : '*'))
   .split(',').map((origin) => origin.trim().replace(/\/+$/, '')).filter(Boolean);
+if (stagingMockOtpEnabled && (!corsOrigins.length || corsOrigins.includes('*'))) {
+  throw new Error('STAGING_MOCK_OTP_ENABLED requires explicit, non-wildcard CORS_ORIGINS.');
+}
 if (isProduction && (!corsOrigins.length || corsOrigins.includes('*') || corsOrigins.some((origin) =>
   !/^https:\/\//.test(origin) && !/^http:\/\/localhost(?::\d+)?$/.test(origin)))) {
   throw new Error('CORS_ORIGINS must contain exact HTTPS origins (localhost may use HTTP).');
@@ -82,6 +93,8 @@ if (identityProvider === 'aws-rekognition') {
 
 export const env = {
   isProduction,
+  stagingMockOtpEnabled,
+  stagingMockOtpCode,
   emailVerificationRequired,
   adminMfaRequired,
   port: Number(process.env.PORT || 4000),
