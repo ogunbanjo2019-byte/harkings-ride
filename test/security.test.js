@@ -1,6 +1,7 @@
 import test, { before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import { createHash, createHmac } from 'node:crypto';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 process.env.NODE_ENV = 'test';
@@ -63,6 +64,109 @@ test('phone OTP stays disabled until Twilio server credentials are configured', 
   assert.equal(response.status, 503);
   assert.equal(response.body.error.code, 'SMS_PROVIDER_NOT_CONFIGURED');
   assert.equal(db.otpChallenges.length, 0);
+});
+
+test('staging mock OTP cannot start outside staging or with wildcard CORS', () => {
+  const loadConfig = "import('./src/config/env.js')";
+  const baseEnv = { ...process.env, STAGING_MOCK_OTP_ENABLED: 'true' };
+  const outsideStaging = spawnSync(process.execPath, ['-e', loadConfig], {
+    cwd: process.cwd(),
+    env: { ...baseEnv, NODE_ENV: 'production', CORS_ORIGINS: 'https://staging.example.com' },
+    encoding: 'utf8',
+  });
+  assert.notEqual(outsideStaging.status, 0);
+  assert.match(outsideStaging.stderr, /may only be enabled when NODE_ENV=staging/);
+
+  const wildcardCors = spawnSync(process.execPath, ['-e', loadConfig], {
+    cwd: process.cwd(),
+    env: { ...baseEnv, NODE_ENV: 'staging', CORS_ORIGINS: '*' },
+    encoding: 'utf8',
+  });
+  assert.notEqual(wildcardCors.status, 0);
+  assert.match(wildcardCors.stderr, /requires explicit, non-wildcard CORS_ORIGINS/);
+});
+
+test('registration validates email and international phone formats at the API boundary', async () => {
+  const invalidEmail = await request(app).post('/api/v1/auth/register').send({
+    name: 'Invalid Email', email: 'not-an-email', phone: '+447700900123', password: 'Password123!', role: 'rider',
+  });
+  assert.equal(invalidEmail.status, 400);
+  assert.equal(invalidEmail.body.error.code, 'VALIDATION_ERROR');
+
+  const invalidPhone = await request(app).post('/api/v1/auth/register').send({
+    name: 'Invalid Phone', email: 'invalid-phone@example.com', phone: 'abc123', password: 'Password123!', role: 'rider',
+  });
+  assert.equal(invalidPhone.status, 400);
+  assert.equal(invalidPhone.body.error.code, 'VALIDATION_ERROR');
+
+  const registered = await request(app).post('/api/v1/auth/register').send({
+    name: 'International Rider', email: 'international@example.com', phone: '+447700900123', password: 'Password123!', role: 'rider',
+  });
+  assert.equal(registered.status, 201);
+  assert.equal(registered.body.data.user.phone, '+447700900123');
+});
+
+test('staging mock OTP supports driver phone login without SMS and remains single-use', async () => {
+  const previousNodeEnv = process.env.NODE_ENV;
+  const previousEnabled = env.stagingMockOtpEnabled;
+  const previousCode = env.stagingMockOtpCode;
+  process.env.NODE_ENV = 'staging';
+  env.stagingMockOtpEnabled = true;
+  env.stagingMockOtpCode = '123456';
+  try {
+    const registered = await request(app).post('/api/v1/auth/register').send({
+      name: 'International Driver', email: 'mock-driver@example.com', phone: '+447700900124',
+      password: 'Password123!', role: 'driver', vehiclePlateNumber: 'TST-444AA',
+    });
+    assert.equal(registered.status, 201);
+
+    const sent = await request(app).post('/api/v1/auth/send-otp').send({
+      phone: '+447700900124', purpose: 'login',
+    });
+    assert.equal(sent.status, 202);
+    assert.equal(sent.body.data.deliveryStatus, 'staging_mock');
+    assert.equal(Object.hasOwn(sent.body.data, 'developmentOtp'), false);
+    assert.notEqual(db.otpChallenges.at(-1).codeHash, '123456');
+
+    const verified = await request(app).post('/api/v1/auth/verify-otp').send({
+      challengeId: sent.body.data.challengeId, phone: '+447700900124', purpose: 'login', code: '123456',
+    });
+    assert.equal(verified.status, 200);
+    assert.equal(verified.body.data.user.role, 'driver');
+
+    const replay = await request(app).post('/api/v1/auth/verify-otp').send({
+      challengeId: sent.body.data.challengeId, phone: '+447700900124', purpose: 'login', code: '123456',
+    });
+    assert.equal(replay.status, 400);
+
+    const riderRegistered = await request(app).post('/api/v1/auth/register').send({
+      name: 'International Rider', email: 'mock-rider@example.com', phone: '+447700900125',
+      password: 'Password123!', role: 'rider',
+    });
+    assert.equal(riderRegistered.status, 201);
+    const riderChallengeId = '00000000-0000-4000-8000-000000000125';
+    db.otpChallenges.push({
+      id: riderChallengeId,
+      channel: 'phone',
+      destination: '+447700900125',
+      purpose: 'login',
+      codeHash: createHash('sha256').update('123456').digest('hex'),
+      attempts: 0,
+      maxAttempts: 5,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+      createdAt: new Date().toISOString(),
+      usedAt: null,
+    });
+    const riderVerified = await request(app).post('/api/v1/auth/verify-otp').send({
+      challengeId: riderChallengeId, phone: '+447700900125', purpose: 'login', code: '123456',
+    });
+    assert.equal(riderVerified.status, 200);
+    assert.equal(riderVerified.body.data.user.role, 'rider');
+  } finally {
+    process.env.NODE_ENV = previousNodeEnv;
+    env.stagingMockOtpEnabled = previousEnabled;
+    env.stagingMockOtpCode = previousCode;
+  }
 });
 
 test('staging responses never reveal development OTPs or reset tokens', async () => {

@@ -553,6 +553,7 @@ router.post('/verify-otp', validate(verifyOtpSchema), (req, res) => {
 
   if (challenge.channel === 'phone' && challenge.purpose === 'login') {
     const user = findUser({ phone: challenge.destination });
+    const allowedRoles = env.stagingMockOtpEnabled ? ['driver', 'rider'] : ['driver'];
     if (user?.status === 'closed') {
       return fail(
         res,
@@ -563,7 +564,7 @@ router.post('/verify-otp', validate(verifyOtpSchema), (req, res) => {
     }
     if (
       !user ||
-      user.role !== 'driver' ||
+      !allowedRoles.includes(user.role) ||
       ['suspended', 'deletion_requested'].includes(user.status)
     ) {
       return fail(res, 400, 'That code is not correct.', 'OTP_INVALID');
