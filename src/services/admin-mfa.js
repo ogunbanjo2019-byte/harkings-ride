@@ -75,3 +75,4 @@ export const totpUri = (secret, email) => {
   const issuer = encodeURIComponent('SwitchRide');
   return `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
 };
+  

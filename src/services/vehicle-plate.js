@@ -5,3 +5,4 @@ export const normalizeVehiclePlate = (value) => {
 
 export const isValidVehiclePlate = (value) =>
   /^[A-Z]{3}-\d{3}[A-Z]{2}$/.test(normalizeVehiclePlate(value));
+    
