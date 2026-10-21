@@ -1,7 +1,3 @@
--- Harkingzride API persistence repair
--- Run in the Supabase SQL Editor for the same project used by Render.
--- This creates/repairs only the app_records storage table and atomic snapshot RPC.
-
 create table if not exists public.app_records (
   collection text not null,
   id text not null,
